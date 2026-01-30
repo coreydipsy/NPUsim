@@ -3,11 +3,47 @@ from functools import lru_cache
 import glob
 from math import ceil, sqrt
 import os
+import re
 from typing import Any, Sequence
 
 import neusim.npusim.frontend.Operator as Operator
-import neusim.xla_hlo_parser.xla_hlo_trace_parser as hlo_parser
 import neusim.xla_hlo_parser.xla_hlo_structures as hlo_struct
+
+
+def parse_input_tensor_shapes(input_tensor_shape_str: str) -> tuple[list[list[int]], list[str]]:
+    '''Returns (shape, dtype)'''
+    tensor_shape_regex_pattern = r",*DT_[A-Z|0-9]+:"
+    shapes = re.split(tensor_shape_regex_pattern, input_tensor_shape_str)
+    shapes = [x for x in shapes if len(x) > 0]
+    shapes = [x.removeprefix("[").removesuffix("]") for x in shapes]
+    shapes = [
+        [int(y) for y in x.split(",")]
+        for x in shapes
+    ]
+
+    dtype_regex_pattern = r"DT_[A-Z|0-9]+:"
+    dtypes = re.findall(dtype_regex_pattern, input_tensor_shape_str)
+    dtypes = [x.removesuffix(":") for x in dtypes]
+
+    return shapes, dtypes
+
+
+def parse_output_tensor_shapes(output_tensor_shape_str: str) -> tuple[list[list[int]], list[str]]:
+    '''Returns (shape, dtype)'''
+    tensor_shape_regex_pattern = r",*DT_[A-Z|0-9]+:"
+    shapes = re.split(tensor_shape_regex_pattern, output_tensor_shape_str)
+    shapes = [x.removeprefix("[").removesuffix("]").removesuffix("],[") for x in shapes]
+    shapes = [x for x in shapes if len(x) > 0]
+    shapes = [
+        [int(y) for y in x[1:-1].split(",")]  # y is like "(1, 2, 3)"
+        for x in shapes
+    ]
+
+    dtype_regex_pattern = r"DT_[A-Z|0-9]+:"
+    dtypes = re.findall(dtype_regex_pattern, output_tensor_shape_str)
+    dtypes = [x.removesuffix(":") for x in dtypes]
+
+    return shapes, dtypes
 
 
 def get_size_bytes_from_dtype(dtype: str) -> int:
@@ -163,66 +199,6 @@ def construct_hlo_module_from_node_costs(node_costs: Sequence[dict[str, Any] | O
         I = construct_hlo_instruction_from_node_cost(node_cost)
         module.ENTRY.instructions.append(I)
     return module
-
-
-def get_tfsim_node_costs(tfsim_dir: str, bn: str, bs: int, sa: int = 4, vu: int = 1) -> list[dict[str, Any]]:
-    if bn in ["llama13b"]:  # llama2-13b from tf-sim analytical
-        node_cost_csv_path = os.path.join(tfsim_dir, f"xla_hlo_{bn}_{bs}", f"sa{sa}_vu{vu}", "JellyFish-TPU_Conv-Opt-4SA-4VU-LLaMA-13B-serving-fwd_bwd_ops.csv")
-    # elif bn in ["clip-vit", "vicuna13b", "seem", "lama", "gligen"]:  # multimodal benchmarks
-    #     node_cost_csv_path = os.path.join(tfsim_dir, f"xla_hlo_{bn}_{bs}", f"sa{sa}_vu{vu}", "cluster*", "node_costs.csv")
-    else:  # other benchmarks from tf-sim
-        node_cost_csv_path = os.path.join(tfsim_dir, f"xla_hlo_{bn}_{bs}", f"sa{sa}_vu{vu}", "cluster*", "node_costs.csv")
-    nc_glob = glob.glob(node_cost_csv_path)
-    assert len(nc_glob) == 1, f"benchmark '{bn}.{bs}': node_costs.csv not found in directory {node_cost_csv_path}"
-    node_costs_file_path = nc_glob[0]
-    with open(node_costs_file_path, "r") as f:
-        reader = csv.DictReader(f)
-        node_costs = list(reader)
-
-    # allocate new field names
-    def init_new_field(field_name, default_value = None):
-        if field_name not in nc:
-            nc[field_name] = default_value
-    for nc in node_costs:
-        init_new_field("parsed_op_type")
-        init_new_field("dim_labels")
-        init_new_field("tile_shapes")
-        init_new_field("num_tiles")
-        init_new_field("max_vmem_demand_bytes")
-        init_new_field("num_mxu_ops", 0)
-        init_new_field("einsum_B_size")
-        init_new_field("einsum_M_size")
-        init_new_field("einsum_N_size")
-        init_new_field("einsum_K_size")
-
-    return node_costs
-
-
-def get_top_level_node_op_name(node: dict[str, Any]) -> str:
-    '''return the op name of the top level node of @node'''
-    if node["Top Level Node"] == "True":
-        return node["Op Name"]
-
-    name_dir = str(node["Op Name"]).split("/")
-    tln_name = name_dir[0]
-
-    # hack for While node in transformer model
-    if "while" in tln_name:
-        return "While"
-
-    return tln_name
-
-
-def get_top_level_node(node: dict[str, Any], node_costs: list[dict[str, Any]]) -> dict[str, Any]:
-    '''return the top level node of @node'''
-    if node["Top Level Node"] == "True":
-        return node
-
-    tln_name = get_top_level_node_op_name(node)
-    for nc in node_costs:
-        if nc["Op Name"] == tln_name:
-            return nc
-    raise ValueError(f"Top level node not found for node: {node}")
 
 
 def get_total_execution_time_ns_from_ops(node_costs: list[Operator.Operator]) -> int:

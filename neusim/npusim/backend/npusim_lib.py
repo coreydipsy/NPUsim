@@ -22,42 +22,6 @@ EINSUM_OP_TYPES = [
 ]
 
 
-def parse_input_tensor_shapes(input_tensor_shape_str: str) -> Tuple[List[List[int]], List[str]]:
-    '''Returns (shape, dtype)'''
-    tensor_shape_regex_pattern = r",*DT_[A-Z|0-9]+:"
-    shapes = re.split(tensor_shape_regex_pattern, input_tensor_shape_str)
-    shapes = [x for x in shapes if len(x) > 0]
-    shapes = [x.removeprefix("[").removesuffix("]") for x in shapes]
-    shapes = [
-        [int(y) for y in x.split(",")]
-        for x in shapes
-    ]
-
-    dtype_regex_pattern = r"DT_[A-Z|0-9]+:"
-    dtypes = re.findall(dtype_regex_pattern, input_tensor_shape_str)
-    dtypes = [x.removesuffix(":") for x in dtypes]
-
-    return shapes, dtypes
-
-
-def parse_output_tensor_shapes(output_tensor_shape_str: str) -> Tuple[List[List[int]], List[str]]:
-    '''Returns (shape, dtype)'''
-    tensor_shape_regex_pattern = r",*DT_[A-Z|0-9]+:"
-    shapes = re.split(tensor_shape_regex_pattern, output_tensor_shape_str)
-    shapes = [x.removeprefix("[").removesuffix("]").removesuffix("],[") for x in shapes]
-    shapes = [x for x in shapes if len(x) > 0]
-    shapes = [
-        [int(y) for y in x[1:-1].split(",")]  # y is like "(1, 2, 3)"
-        for x in shapes
-    ]
-
-    dtype_regex_pattern = r"DT_[A-Z|0-9]+:"
-    dtypes = re.findall(dtype_regex_pattern, output_tensor_shape_str)
-    dtypes = [x.removesuffix(":") for x in dtypes]
-
-    return shapes, dtypes
-
-
 def parse_tensor_shapes_for_node_cost_conv(node_cost: Operator.Operator, hlo_module: hlo_struct.HLOModule) -> Tuple[hlo_struct.HLOInstruction, Operator.Operator]:
     # if node_cost.opcode not in ["convolution", "Conv2D", "Einsum", "MatMul", "BatchMatMulV2"]:
     if node_cost.opcode_type not in [Operator.OpcodeType.CONV2D, Operator.OpcodeType.EINSUM]:
@@ -65,8 +29,8 @@ def parse_tensor_shapes_for_node_cost_conv(node_cost: Operator.Operator, hlo_mod
     assert isinstance(node_cost, (Operator.EinsumOperator, Operator.Conv2DOperator)), \
         f"node_cost is not an Einsum or Conv2D operator: {node_cost}"
 
-    input_shapes, input_dtypes = parse_input_tensor_shapes(node_cost.input_tensor_shape_str)
-    output_shapes, output_dtypes = parse_output_tensor_shapes(node_cost.output_tensor_shape_str)
+    input_shapes, input_dtypes = util.parse_input_tensor_shapes(node_cost.input_tensor_shape_str)
+    output_shapes, output_dtypes = util.parse_output_tensor_shapes(node_cost.output_tensor_shape_str)
     assert len(output_shapes) == 1, f"Output tensor shapes not expected: {output_shapes}"
 
     op_name = node_cost.name.split("/")[-1]
@@ -96,16 +60,6 @@ def parse_tensor_shapes_for_node_cost_conv(node_cost: Operator.Operator, hlo_mod
     for ax in I.output_axes:
         ax.size = output_shapes[0][ax.index]
         ax.data_type = output_dtypes[0]
-
-    # # special hack for each model
-    # if "dlrm" in hlo_module.name:
-    #     I.metadata["op_type"] = "MatMul"
-    # elif "bert" in hlo_module.name:
-    #     if I.metadata["op_type"] == "unknown":
-    #         I.metadata["op_type"] = "Einsum"
-    # elif "transformer" in hlo_module.name:
-    #     if I.metadata["op_type"] == "unknown":
-    #         I.metadata["op_type"] = "Einsum"
 
     def try_check_einsum() -> bool:
         '''
@@ -141,33 +95,12 @@ def parse_tensor_shapes_for_node_cost_conv(node_cost: Operator.Operator, hlo_mod
         # otherwise treat this op as a conv2d
         I.metadata["op_type"] = "Conv2D"
 
-    # # for MatMul: remove axes of size 1 that is used as placeholder in HLO
-    # if I.metadata["op_type"] in EINSUM_OP_TYPES + ["unknown"]:
-    #     I.input_axes[0] = [ax for ax in I.input_axes[0] if ax.size != 1]
-    #     I.input_axes[1] = [ax for ax in I.input_axes[1] if ax.size != 1]
-    #     I.output_axes = [ax for ax in I.output_axes if ax.size != 1]
-
-    # For Einsum/MatMul, axes with the same name have the same size;
-    # for Convolution, spatial0/1 axes have different sizes in kernel (input1). ?
-    # all_axes = I.input_axes[0] + I.input_axes[1] + I.output_axes
-    # axes_dict = {}
-    # for ax in all_axes:
-    #     if ax.name not in axes_dict:
-    #         axes_dict[ax.name] = ax.size
-    #     else:
-    #         if I.metadata["op_type"] in EINSUM_OP_TYPES:
-    #             # For Einsum/MatMul, check axis sizes match
-    #             assert axes_dict[ax.name] == ax.size, f"axes size not consistent: {ax.name}"
-    #         else:
-    #             # If not match, guess this is a Conv2D
-    #             I.metadata["op_type"] = "Conv2D"
-
     return I, node_cost
 
 
 def parse_tensor_shapes_for_node_cost_default(node_cost: Operator.Operator, hlo_module: hlo_struct.HLOModule) -> tuple[hlo_struct.HLOInstruction, Operator.Operator]:
-    input_shapes, input_dtypes = parse_input_tensor_shapes(node_cost.input_tensor_shape_str)
-    output_shapes, output_dtypes = parse_output_tensor_shapes(node_cost.output_tensor_shape_str)
+    input_shapes, input_dtypes = util.parse_input_tensor_shapes(node_cost.input_tensor_shape_str)
+    output_shapes, output_dtypes = util.parse_output_tensor_shapes(node_cost.output_tensor_shape_str)
     assert len(output_shapes) == 1, f"Output tensor shapes not expected: {output_shapes}"
 
     op_name = node_cost.name.split("/")[-1]
@@ -203,15 +136,6 @@ def parse_tensor_shapes_for_node_cost(node_cost: Operator.Operator, hlo_module: 
         return parse_tensor_shapes_for_node_cost_conv(node_cost, hlo_module)
     else:
         return parse_tensor_shapes_for_node_cost_default(node_cost, hlo_module)
-
-
-# def parse_tensor_shapes_for_op(op: Operator.Operator, hlo_module: hlo_struct.HLOModule) -> tuple[hlo_struct.HLOInstruction, Operator.Operator]:
-#     if op.opcode in ["convolution", "Conv2D", "Einsum", "MatMul", "BatchMatMulV2"]:
-#         I, op_dict = parse_tensor_shapes_for_node_cost_conv(Operator.to_csv_dict(op), hlo_module)
-#     else:
-#         I, op_dict = parse_tensor_shapes_for_node_cost_default(Operator.to_csv_dict(op), hlo_module)
-
-#     return I, Operator.from_csv_dict(op_dict)
 
 
 def separate_axes_by_type_for_matmul(
@@ -1568,19 +1492,6 @@ def compute_node_cost_compute_time(
             return 0, total_vpu_time
         else:
             raise NotImplementedError(f"Op type {op_type} not supported")
-
-
-# def compute_op_compute_time(
-#     I: hlo_struct.HLOInstruction,
-#     op: Operator.Operator,
-#     config: ChipConfig,
-# ) -> tuple[int, int]:
-#     '''
-#     Return (MXU, VPU) Time
-#     based on the op type and tensor shapes in @I and @op.
-#     '''
-#     nc = Operator.to_csv_dict(op)
-#     return compute_node_cost_compute_time(I, nc, config)
 
 
 def update_node_cost_compute_time(
