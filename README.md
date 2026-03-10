@@ -192,6 +192,25 @@ pytest --cov=.
 All tests covering a certain module should be placed under the `tests` directory under that module.
 All test files should be named with the `test_*.py` format. If a unit test requires inputs from files, the input files should be placed under the `tests` directory (preferably inside a sub-directory of `tests`). See `neusim/backend/tests` for examples.
 
+### Regression Testing
+The regression test (`neusim/tests/regression/`) compares simulation outputs between the current code and a baseline commit (default `HEAD~1`). It runs a set of experiments on both versions and generates a diff report for human review. The test always passes — output differences are not treated as failures, since they may be intentional (e.g., bug fixes or feature changes).
+
+The regression test is marked as `slow` and is skipped by default. To run it:
+```bash
+# Run the regression test
+pytest neusim/tests/regression/test_regression.py --runslow -v
+
+# Or via environment variable
+NEUSIM_RUN_SLOW_TESTS=1 pytest neusim/tests/regression/test_regression.py -v
+
+# Compare against a specific commit or tag
+NEUSIM_REGRESSION_BASELINE=v1.0.0 pytest neusim/tests/regression/test_regression.py --runslow -v
+```
+
+The diff report is saved to `results/regression/regression_report.txt` by default. This can be overridden with the `NEUSIM_REGRESSION_REPORT_PATH` environment variable.
+
+The test covers 7 experiments across all supported model types (LLM, DeepSeek, DLRM, DiT) and parallelism dimensions (TP, PP, DP, EP, DP_DCN, PP_DCN, EP_DCN).
+
 ## 🌟 Citation
 
 Please consider citing us if you find NeuSim useful in your research:

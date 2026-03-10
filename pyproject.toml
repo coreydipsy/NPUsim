@@ -47,3 +47,7 @@ check_untyped_defs = true
 norecursedirs = ["results", "dist", "build", ".git", "*.egg-info"]
 testpaths = ["neusim"]
 addopts = "--cov=neusim"
+markers = [
+    "slow: marks tests as slow (skipped unless --runslow or NEUSIM_RUN_SLOW_TESTS=1)",
+    "regression: regression tests comparing against previous commit",
+]
