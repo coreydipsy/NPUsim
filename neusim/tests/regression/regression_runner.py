@@ -103,7 +103,7 @@ def _run_single_experiment(
     else:
         raise ValueError(f"Unsupported model: {model}")
 
-    ops_generator.generate(dump_to_file=True, analyze_energy=False)
+    ops_generator.generate(dump_to_file=True, analyze_energy=True)
 
     # Dump stats (replicates run_sim.py dump_stats logic)
     config_dict = ops_generator.config.model_dump(mode="json")
