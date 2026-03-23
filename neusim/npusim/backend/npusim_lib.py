@@ -570,7 +570,7 @@ def get_best_tile_config_for_flash_attention_from_vmem_size(
     vmem_MB = config.vmem_size_MB
     sa_dim = config.sa_dim
     dtype_bytes = util.get_size_bytes_from_dtype(I.input_axes[0][0].data_type)
-    batch, q_seqlen, kv_seqlen, num_heads, d_head = (
+    batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head = (
         get_axes_size_for_flash_attention(I, node_cost)
     )
 
@@ -618,17 +618,18 @@ def compute_bytes_accessed_from_tile_config_flash_attention(
     For the complete description of tile sizes @Br and @Bc, see https://arxiv.org/pdf/2205.14135.
     '''
     dtype_bytes = util.get_size_bytes_from_dtype(I.input_axes[0][0].data_type)
-    batch, q_seqlen, kv_seqlen, num_heads, d_head = (
+    batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head = (
         get_axes_size_for_flash_attention(I, node_cost)
     )
 
     # 1. Calculate the traffic for each sequence and each attention head.
     num_Bc_tiles = int(np.ceil(kv_seqlen / Bc))
-    KV_traffic = 2 * kv_seqlen * d_head
-    Q_and_output_traffic = 2 * num_Bc_tiles * q_seqlen * d_head
+    # KV is read once per KV head; Q and output are read/written per Q head.
+    KV_traffic = batch * num_kv_heads * 2 * kv_seqlen * d_head
+    Q_and_output_traffic = batch * num_q_heads * 2 * num_Bc_tiles * q_seqlen * d_head
 
-    # 2. The total mem traffic is the sum for the entire batch and all heads.
-    total_traffic = batch * num_heads * (KV_traffic + Q_and_output_traffic)
+    # 2. The total mem traffic is the sum of KV and Q/output traffic.
+    total_traffic = KV_traffic + Q_and_output_traffic
 
     return total_traffic * dtype_bytes
 
@@ -642,16 +643,16 @@ def compute_bytes_accessed_from_vmem_size_for_flash_attention(
     Side effect: Set node_cost["tile_shapes"] to be [Bc, Br].
     '''
     dtype_bytes = util.get_size_bytes_from_dtype(I.input_axes[0][0].data_type)
-    batch, q_seqlen, kv_seqlen, num_heads, d_head = (
+    batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head = (
         get_axes_size_for_flash_attention(I, node_cost)
     )
 
     # If total mem footprint (Q,K,V,S,O) of this op is smaller than SRAM size,
     # then do not perform tiling.
-    Q_size = batch * q_seqlen * num_heads * d_head
-    KV_size = 2 * batch * kv_seqlen * num_heads * d_head
-    S_size = batch * kv_seqlen * q_seqlen * num_heads * d_head
-    O_size = batch * q_seqlen * num_heads * d_head
+    Q_size = batch * q_seqlen * num_q_heads * d_head
+    KV_size = 2 * batch * kv_seqlen * num_kv_heads * d_head
+    S_size = batch * kv_seqlen * q_seqlen * num_q_heads
+    O_size = batch * q_seqlen * num_q_heads * d_head
     tot_size = (Q_size + KV_size + S_size + O_size) * dtype_bytes
     assert isinstance(node_cost, Operator.FlashAttentionOperator), \
         f"node_cost must be a FlashAttentionOperator, got {type(node_cost)}"
@@ -1293,9 +1294,9 @@ def compute_node_cost_compute_time_for_matmul(
 def get_axes_size_for_flash_attention(
     I: hlo_struct.HLOInstruction,
     node_cost: Operator.Operator,  # unused
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int, int, int, int, int]:
     '''
-    Returns (batch, q_seqlen, kv_seqlen, num_heads, d_head).
+    Returns (batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head).
     Assumes the inputs are in the order of Q, K, V in @param I.
     Assumes the dimensions of each input is [batch, seqlen, num_heads, d_head]
     '''
@@ -1306,14 +1307,15 @@ def get_axes_size_for_flash_attention(
     assert Q_shape[0] == K_shape[0] == V_shape[0], f"Batch size mismatch: {Q_shape[0]}, {K_shape[0]}, {V_shape[0]}"
     batch = Q_shape[0]
     assert K_shape[2] == V_shape[2], f"KV num heads mismatch: {K_shape[2]}, {V_shape[2]}"
-    num_heads = Q_shape[2]
+    num_q_heads = Q_shape[2]
+    num_kv_heads = K_shape[2]
     assert Q_shape[3] == K_shape[3] == V_shape[3], f"Head dim mismatch: {Q_shape[3]}, {K_shape[3]}, {V_shape[3]}"
     d_head = Q_shape[3]
     assert K_shape[1] == V_shape[1], f"Seq len mismatch: {K_shape[1]}, {V_shape[1]}"
     q_seqlen = Q_shape[1]
     kv_seqlen = K_shape[1]
 
-    return batch, q_seqlen, kv_seqlen, num_heads, d_head
+    return batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head
 
 
 def compute_node_cost_compute_time_for_flash_attention(
@@ -1328,7 +1330,7 @@ def compute_node_cost_compute_time_for_flash_attention(
     Assumes the inputs are in the order of Q, K, V in @param I.
     Assumes the dimensions of each input is [batch, seqlen, num_heads, d_head]
     '''
-    batch, q_seqlen, kv_seqlen, num_heads, d_head = get_axes_size_for_flash_attention(I, node_cost)
+    batch, q_seqlen, kv_seqlen, num_q_heads, num_kv_heads, d_head = get_axes_size_for_flash_attention(I, node_cost)
     sa_dim = config.sa_dim
 
     # Assuem each VU op is 128*8 elements,
@@ -1339,16 +1341,16 @@ def compute_node_cost_compute_time_for_flash_attention(
     mxu_time = 0
     vpu_time = 0
 
-    # QK MatMul
-    QK_num_mxu_ops = num_heads * batch * (
+    # QK MatMul: each Q head computes against its corresponding KV head
+    QK_num_mxu_ops = num_q_heads * batch * (
         int(np.ceil(kv_seqlen / sa_dim)) * int(np.ceil(q_seqlen / sa_dim)) * int(np.ceil(d_head / sa_dim))
     )
     mxu_time += compute_node_cost_mxu_time_from_num_ops(QK_num_mxu_ops, config)
     vpu_time += compute_node_cost_vpu_time_from_num_ops(QK_num_mxu_ops * vu_op_multiplier, config)
 
-    # Softmax
+    # Softmax: applied per Q head
     vu_softmax_time = compute_node_cost_vpu_time_from_num_ops(
-        int(np.ceil(4 * batch * num_heads * q_seqlen * kv_seqlen / 128 / 8)),
+        int(np.ceil(4 * batch * num_q_heads * q_seqlen * kv_seqlen / 128 / 8)),
         config,
     )
     vpu_time += vu_softmax_time
@@ -1358,14 +1360,14 @@ def compute_node_cost_compute_time_for_flash_attention(
         f"node_cost must be a FlashAttentionOperator, got {type(node_cost)}"
     node_cost.stats.vu_softmax_time_ns = vu_softmax_time
 
-    # QK_V MatMul
-    QK_V_num_mxu_ops = num_heads * batch * (
+    # QK_V MatMul: each Q head computes against its corresponding KV head
+    QK_V_num_mxu_ops = num_q_heads * batch * (
         int(np.ceil(kv_seqlen / sa_dim)) * int(np.ceil(q_seqlen / sa_dim)) * int(np.ceil(d_head / sa_dim))
     )
     mxu_time += compute_node_cost_mxu_time_from_num_ops(QK_V_num_mxu_ops, config)
     vpu_time += compute_node_cost_vpu_time_from_num_ops(QK_V_num_mxu_ops * vu_op_multiplier, config)
 
-    node_cost.stats.einsum_B_size = batch * num_heads
+    node_cost.stats.einsum_B_size = batch * num_q_heads
     node_cost.stats.einsum_M_size = kv_seqlen
     node_cost.stats.einsum_N_size = q_seqlen
     node_cost.stats.einsum_K_size = d_head
