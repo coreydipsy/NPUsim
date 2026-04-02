@@ -12,6 +12,7 @@ import neusim.npusim.frontend.Operator as Operator
 import neusim.npusim.frontend.power_analysis_lib as power_lib
 from neusim.configs.models.LLMConfig import (
     DeepSeekConfig,
+    GptOssConfig,
     LLMConfig,
 )
 
@@ -1409,3 +1410,171 @@ class DeepSeekOpsGenerator(LLMOpsGeneratorBase):
         # print(f"KV+PE cache: {kv_cache_bytes} bytes")
 
         return round(total_mem_footprint_bytes)
+
+
+class GptOssOpsGenerator(LLMOpsGeneratorBase):
+    """
+    GPT-oss model ops generator for inference.
+
+    GPT-oss-120b is a sparse MoE model (128 experts, top-4 routing) that uses
+    alternating sliding window / full attention across its 36 layers:
+      - Even layers (0, 2, 4, ...): sliding window attention (window=128 tokens)
+      - Odd layers  (1, 3, 5, ...): full causal attention
+
+    This generator produces separate op groups for the two attention types,
+    since they have different KV sequence lengths and thus different compute
+    and memory characteristics.
+
+    Architecture reference: https://arxiv.org/abs/2508.10925
+    """
+
+    def __init__(self, config: dict[str, Any] | GptOssConfig):
+        super().__init__(config)
+        if isinstance(config, dict):
+            self.config = GptOssConfig.model_validate(config)
+        if not isinstance(self.config, GptOssConfig):
+            raise TypeError(
+                "config must be a dict or an instance of GptOssConfig, "
+                f"got self.config={type(self.config)}. input config={type(config)}."
+            )
+
+        # Sliding window parameters
+        self.sliding_window_size: int = self.config.sliding_window_size
+        """Sliding window size for sliding attention layers."""
+        self.layer_types: list[str] = self.config.layer_types
+        """Per-layer attention type list."""
+        self.num_sliding_layers: int = self.config.num_sliding_layers
+        """Number of layers using sliding window attention."""
+        self.num_full_layers: int = self.config.num_full_layers
+        """Number of layers using full causal attention."""
+
+    def generate_prefill_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
+        """
+        Generate prefill operators for GPT-oss.
+
+        The prefill phase processes the entire input prompt in one pass.
+        For GPT-oss, this means generating:
+          1. RMSNorm (all layers)
+          2. Full attention ops (for full-attention layers)
+          3. Sliding window attention ops (for sliding-attention layers)
+             - The KV sequence length is min(input_seqlen, sliding_window_size)
+          4. MoE FFN ops (all layers)
+
+        Hints:
+          - Look at how DeepSeekOpsGenerator.generate_prefill_ops() is structured.
+          - For sliding window layers, use create_sliding_window_attention() from
+            llm_ops_lib.py with num_layers=self.num_sliding_layers.
+          - For full attention layers, use create_multi_head_attention() with
+            num_layers=self.num_full_layers.
+          - For MoE FFN, reuse the DeepSeek MoE FFN by passing
+            ffn_type="deepseek_moe" to create_ffn(). The MoE config fields
+            (num_routed_experts, etc.) are inherited from MoELLMConfig.
+        """
+        # TODO: Implement prefill ops generation for GPT-oss.
+        raise NotImplementedError("TODO: Implement generate_prefill_ops")
+
+    def generate_decode_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
+        """
+        Generate decode operators for GPT-oss.
+
+        The decode phase generates tokens one at a time (autoregressive).
+        Each decode step produces decode_width tokens and attends to the
+        full KV cache built up so far.
+
+        Key difference from prefill:
+          - count = num_layers * output_seqlen (one iteration per output token per layer)
+          - For full attention layers: KV cache spans input_seqlen + output_seqlen
+          - For sliding window layers: KV cache is BOUNDED at sliding_window_size
+            tokens. This is the main memory saving -- old entries beyond the window
+            are evicted, so the cache never grows larger than the window.
+
+        Hints:
+          - For sliding window decode, the KV cache length is just
+            sliding_window_size (not input_seqlen + output_seqlen).
+          - Think carefully about what input_seqlen and output_seqlen mean when
+            passed to create_sliding_window_attention() vs create_multi_head_attention()
+            during decode.
+        """
+        # TODO: Implement decode ops generation for GPT-oss.
+        raise NotImplementedError("TODO: Implement generate_decode_ops")
+
+    def generate(
+        self,
+        fusion_id_start: int = 2,
+        dump_to_file: bool = True,
+        separate_prefill_decode: bool = True,
+        analyze_energy: bool = True,
+        **kwargs,
+    ) -> list[Operator.Operator] | tuple[list[Operator.Operator], ...]:
+        prefill_ops = self.generate_prefill_ops(fusion_id_start=fusion_id_start)
+        decode_ops = self.generate_decode_ops(
+            fusion_id_start=prefill_ops[-1].fusion_id + 1
+        )
+        ops = prefill_ops + decode_ops
+
+        ops = analysis_lib.fill_operators_execution_info(ops, self.config, analyze_energy=analyze_energy)
+
+        if dump_to_file:
+            self.dump_to_file(separate_prefill_decode, ops, prefill_ops, decode_ops)
+
+        if separate_prefill_decode:
+            return ops, prefill_ops, decode_ops
+        else:
+            return ops
+
+    def dump_to_file(self, separate_prefill_decode: bool, ops: list[Operator.Operator], prefill_ops: list[Operator.Operator], decode_ops: list[Operator.Operator]):
+        logging.info(
+            "Generating GPT-oss ops and dumping to %s.",
+            os.path.abspath(self.output_file_path),
+        )
+        if separate_prefill_decode:
+            prefill_ops_dict = [Operator.to_csv_dict(op) for op in prefill_ops]
+            decode_ops_dict = [Operator.to_csv_dict(op) for op in decode_ops]
+            with open(
+                self.output_file_path.replace(".csv", "_prefill.csv"), "w"
+            ) as f:
+                writer = csv.DictWriter(f, fieldnames=prefill_ops_dict[0].keys())
+                writer.writeheader()
+                writer.writerows(prefill_ops_dict)
+            with open(
+                self.output_file_path.replace(".csv", "_decode.csv"), "w"
+            ) as f:
+                writer = csv.DictWriter(f, fieldnames=decode_ops_dict[0].keys())
+                writer.writeheader()
+                writer.writerows(decode_ops_dict)
+        ops_dict = [Operator.to_csv_dict(op) for op in ops]
+        with open(self.output_file_path, "w") as f:
+            writer = csv.DictWriter(f, fieldnames=ops_dict[0].keys())
+            writer.writeheader()
+            writer.writerows(ops_dict)
+
+    def compute_memory_footprint_bytes(self, prefill_or_decode: str = "decode") -> int:
+        """
+        Compute the memory footprint of GPT-oss inference in bytes.
+
+        The memory footprint consists of:
+          1. Model weights (attention projections + MoE expert weights + router)
+             - Same for all layers regardless of attention type
+          2. KV cache
+             - Full attention layers: KV cache spans the full sequence
+             - Sliding attention layers: KV cache is BOUNDED at sliding_window_size
+             - This is the key difference from standard LLM memory footprint!
+
+        For reference, at 128k context with 128-token window:
+          - Full attention KV cache per layer: B * 131072 * num_kv_heads * d_head * 2
+          - Sliding window KV cache per layer: B * 128 * num_kv_heads * d_head * 2
+          - That's ~1000x reduction in KV cache for sliding layers!
+
+        Hints:
+          - Look at get_llm_inference_mem_requirement() in
+            memory_footprint_analysis_lib.py for how the standard LLM memory
+            footprint is computed.
+          - You need to split the KV cache calculation: full_layers use full
+            seqlen, sliding_layers use min(seqlen, sliding_window_size).
+          - Weight memory is the same for both layer types (the W_q, W_k, W_v,
+            W_o projection matrices have the same shapes regardless of window size).
+          - For MoE weights, you can compute: num_experts * 3 * d_model * moe_d_ff
+            (gate + up + down projections per expert).
+        """
+        # TODO: Implement memory footprint calculation.
+        raise NotImplementedError("TODO: Implement compute_memory_footprint_bytes")

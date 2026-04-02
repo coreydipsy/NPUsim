@@ -7,7 +7,7 @@ import numpy as np
 from copy import deepcopy
 
 import neusim.npusim.backend.util as util
-from neusim.configs.models.LLMConfig import DeepSeekConfig
+from neusim.configs.models.LLMConfig import DeepSeekConfig, MoELLMConfig
 from neusim.configs.chips.ChipConfig import ChipConfig
 
 from neusim.configs.models.ModelConfig import ModelConfig
@@ -2100,6 +2100,152 @@ def create_multi_head_attention(
         raise ValueError(f"Unsupported attention type: {type}")
 
 
+def create_sliding_window_attention(
+    batch_size: int,
+    q_seqlen: int,
+    sliding_window_size: int,
+    num_heads: int,
+    num_kv_heads: int,
+    d_model: int,
+    d_head: int,
+    num_layers: int,
+    config: ModelConfig,
+    dtype: str = "DT_BFLOAT16",
+    fusion_id_start: int = 0,
+    is_decode: bool = False,
+    description_prefix: str = "",
+    use_flash_attention: bool = False,
+    tensor_parallelism_axes: Sequence[int] = [1],
+    ici_bw_GBps: float = 900.0,
+) -> list[Operator]:
+    '''
+    Creates attention ops for sliding window attention.
+
+    In sliding window attention, each token only attends to the previous
+    `sliding_window_size` tokens, rather than the full sequence. This reduces
+    both the compute cost of the attention block and the KV cache memory.
+
+    Behavior by phase:
+      - Prefill: Q has shape [B, q_seqlen, ...], but K/V only span
+        min(q_seqlen, sliding_window_size) tokens. The attention matmul
+        is thus [B, q_seqlen, N, D] x [B, kv_seqlen, N, D] where
+        kv_seqlen = min(q_seqlen, sliding_window_size).
+      - Decode: Each new token attends to the last sliding_window_size tokens
+        in the KV cache. The KV cache is bounded and does not grow beyond
+        the window size.
+
+    Args:
+        batch_size: Local batch size per chip.
+        q_seqlen: Full query sequence length.
+        sliding_window_size: Number of past tokens each query can attend to.
+        num_heads: Number of query attention heads (before TP splitting --
+            create_multi_head_attention handles TP internally).
+        num_kv_heads: Number of key/value attention heads for GQA.
+            For standard MHA, num_kv_heads == num_heads.
+            For GQA (e.g., GPT-oss: 64 Q heads, 8 KV heads), num_kv_heads < num_heads.
+        d_model: Hidden dimension of the model.
+        d_head: Dimension of each attention head.
+        num_layers: Number of layers using this attention type.
+        config: Model configuration object.
+        dtype: Data type for tensors.
+        fusion_id_start: Starting fusion ID for operator grouping.
+        is_decode: Whether this is decode (True) or prefill (False).
+        description_prefix: Prefix for operator descriptions.
+        use_flash_attention: Whether to use flash attention for prefill.
+        tensor_parallelism_axes: TP axis dimensions.
+        ici_bw_GBps: ICI bandwidth in GB/s.
+
+    Returns:
+        List of Operator objects representing the sliding window attention.
+
+    Hints:
+        - The key difference from full attention is the KV sequence length.
+          Think about what kv_seqlen should be in each phase (prefill vs decode).
+        - You can reuse the existing create_multi_head_attention() function
+          by passing appropriate arguments. Look at how it handles the
+          "cross-attention" type with separate q_seqlen and kv_seqlen for prefill,
+          and "self-attention" type with input_seqlen/output_seqlen for decode.
+        - For the Q/K/V projections, the weight shapes are the same as full
+          attention -- only the attention computation uses the reduced window.
+        - Don't forget to account for GQA: K and V projections should use
+          num_kv_heads, not num_heads.
+        - IMPORTANT for decode: the self-attention decode path internally splits
+          the KV cache into prefix (input_seqlen) and suffix (output_seqlen).
+          Both must be >= 1; passing output_seqlen=0 will cause a
+          ZeroDivisionError in the backend. So for a bounded cache of size W,
+          use input_seqlen=W-1, output_seqlen=1 (or similar split that sums to W).
+    '''
+
+    # TODO: Implement sliding window attention.
+    #
+    # Step 1: Compute the effective KV sequence length based on the phase.
+    #   - Prefill: kv_seqlen = ???
+    #   - Decode:  kv_seqlen = ???
+    
+    if (not is_decode): # prefill
+        kv_seqlen = min(q_seqlen, sliding_window_size)
+    else: # decode
+        kv_seqlen = sliding_window_size
+        
+    # Step 2: Create the attention ops. You can either:
+    #   (a) Call create_multi_head_attention() with the right parameters, or
+    #   (b) Build the ops manually (Q/K/V projections, attention block, output projection).
+    #
+    # Step 3: Return the list of operators.
+
+    # (a)
+    # built the parameters
+
+    # attention type: 
+    # "cross-attention" type with separate q_seqlen and kv_seqlen for prefill
+    # "self-attention" type with input_seqlen/output_seqlen for decode
+    if (not is_decode): # prefill
+        attention_type = "cross-attention" 
+
+        # default value but should never be used
+        input_seqlen = q_seqlen
+        output_seqlen = q_seqlen
+
+        
+    else: # decode
+        attention_type = "self-attention"
+        # input seqlen and output seqlen for decode 
+        # Decode: Each new token attends to the last sliding_window_size tokens in the KV cache
+        # these two values should only be used for decode
+        input_seqlen = sliding_window_size - 1
+        output_seqlen = 1
+
+    
+
+
+    return create_multi_head_attention(
+        batch_size,
+        input_seqlen,
+        output_seqlen,
+        config.decode_width, # generate one token at a time
+        num_heads,
+        d_model,
+        d_head,
+        num_layers,
+        config,
+        dtype,
+        fusion_id_start,
+        is_decode,
+        description_prefix,
+        attention_type, # use two different type based on decode or prefill
+        q_seqlen,
+        kv_seqlen,
+        None, # d_query default (width of query input tensor)
+        None, # d_key default (width of key input tensor)
+        None, # d_value default (width of value input tensor)
+        use_flash_attention,
+        tensor_parallelism_axes,
+        ici_bw_GBps,
+        num_kv_heads, # i guess GQA will set this, or if not it will be none
+    )
+    
+
+
 def create_multi_head_normal_attention_block(
     batch_size: int,
     q_seqlen: int,
@@ -3421,8 +3567,8 @@ def create_ffn_deepseek_moe_gate(
     fusion_id_start: int = 0,
     description_prefix: str = "",
 ) -> list[Operator]:
-    assert isinstance(config, DeepSeekConfig), \
-        f"Config must be an instance of DeepSeekConfig. Got {type(config)} instead."
+    assert isinstance(config, MoELLMConfig), \
+        f"Config must be an instance of MoELLMConfig (or subclass). Got {type(config)} instead."
 
     ops: list[Operator] = []
     fusion_id = fusion_id_start
@@ -3480,8 +3626,8 @@ def create_ffn_deepseek_moe(
     @tensor_parallelism_axes: Axes for expert tensor parallelism.
     @expert_parallelism_axes: Axes for expert parallelism.
     '''
-    assert isinstance(config, DeepSeekConfig), \
-        f"Config must be an instance of DeepSeekConfig. Got {type(config)} instead."
+    assert isinstance(config, MoELLMConfig), \
+        f"Config must be an instance of MoELLMConfig (or subclass). Got {type(config)} instead."
 
     ops: list[Operator] = []
     fusion_id = fusion_id_start
@@ -3576,19 +3722,20 @@ def create_ffn_deepseek_moe(
         )
         fusion_id += 1
 
-    # shared expert computation
-    ops += create_ffn_matmul_llama(
-        batch_size=batch_size,
-        seqlen=seqlen,
-        d_model=config.d_model,
-        d_ff=(d_ff * config.num_shared_experts),
-        count=count,
-        dtype=dtype,
-        fusion_id_start=fusion_id,
-        is_decode=is_decode,
-        description_prefix=(description_prefix + "FFN_shared_expert-"),
-    )
-    fusion_id = ops[-1].fusion_id + 1
+    # shared expert computation (skip if no shared experts)
+    if config.num_shared_experts > 0:
+        ops += create_ffn_matmul_llama(
+            batch_size=batch_size,
+            seqlen=seqlen,
+            d_model=config.d_model,
+            d_ff=(d_ff * config.num_shared_experts),
+            count=count,
+            dtype=dtype,
+            fusion_id_start=fusion_id,
+            is_decode=is_decode,
+            description_prefix=(description_prefix + "FFN_shared_expert-"),
+        )
+        fusion_id = ops[-1].fusion_id + 1
 
     # token combine weights
     ops.append(

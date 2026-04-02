@@ -436,6 +436,8 @@ def map_parallelism_to_ici_axes(model: str, v: str, parallelism_config: dict[str
         return map_parallelism_to_ici_axes_llm(model, v, parallelism_config)
     elif "deepseek" in model.lower():
         return map_parallelism_to_ici_axes_llm_moe(model, v, parallelism_config)
+    elif "gpt-oss" in model.lower():
+        return map_parallelism_to_ici_axes_llm_moe(model, v, parallelism_config)
     elif "dlrm" in model.lower():
         return max_num_axes, max_num_axes, 0
     elif "gligen" in model.lower() or "dit" in model.lower():
@@ -617,6 +619,8 @@ def validate_parallelism_config(
     if "llama" in model.lower():
         return validate_parallelism_config_llm(model, v, config, workload, allow_oom, prefill_or_decode)
     elif "deepseek" in model.lower():
+        return validate_parallelism_config_llm_moe(model, v, config, workload, allow_oom, prefill_or_decode)
+    elif "gpt-oss" in model.lower():
         return validate_parallelism_config_llm_moe(model, v, config, workload, allow_oom, prefill_or_decode)
     elif "dlrm" in model.lower():
         return True

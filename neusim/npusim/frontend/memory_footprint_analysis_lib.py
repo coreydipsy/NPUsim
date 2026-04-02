@@ -9,7 +9,7 @@ import neusim.npusim.frontend.query_results_helper_lib as results_lib
 from neusim.configs.models.DiTConfig import DiTConfig
 from neusim.configs.models.DLRMConfig import DLRMConfig
 from neusim.configs.models.GLIGENConfig import GLIGENConfig
-from neusim.configs.models.LLMConfig import DeepSeekConfig, LLMConfig
+from neusim.configs.models.LLMConfig import DeepSeekConfig, GptOssConfig, LLMConfig
 
 
 BYTES_FP32 = 4
@@ -222,6 +222,10 @@ def get_llm_inference_weight_mem_requirement(
         mem_bytes = get_deepseek_inference_mem_requirement(
             config, "prefill"
         )
+    elif isinstance(config, GptOssConfig):
+        mem_bytes = get_gptoss_inference_mem_requirement(
+            config, "prefill"
+        )
     else:
         mem_bytes = get_llm_inference_mem_requirement(
             config, "prefill", weight_bytes_per_element, 2
@@ -263,6 +267,17 @@ def get_llm_inference_kv_cache_mem_requirement(
             kv_cache_bytes_per_token * bs * seqlen / tp
         )  # sequence parallelism over TP axes
         # print(f"KV+PE cache: {kv_cache_bytes} bytes")
+    elif isinstance(config, GptOssConfig):
+        # GPT-oss: sliding window layers have bounded KV cache
+        num_kv_heads = config.num_kv_heads
+        d_head = config.d_head
+
+        # TODO: Compute the KV cache size for GPT-oss.
+        # Full attention layers use the full seqlen for KV cache.
+        # Sliding window layers use min(seqlen, sliding_window_size).
+        # The total KV cache is the sum across both layer types.
+        raise NotImplementedError(
+            "TODO: Implement KV cache calculation for GptOssConfig")
     else:
         num_kv_heads = config.num_kv_heads
         d_head = config.d_head
@@ -272,6 +287,43 @@ def get_llm_inference_kv_cache_mem_requirement(
         else:
             kv_cache_bytes = bs * seqlen * num_heads * d_head * 2
     return kv_cache_bytes
+
+
+def get_gptoss_inference_mem_requirement(
+    config: GptOssConfig,
+    prefill_or_decode: str = "decode",
+    weight_bytes_per_element: int = BYTES_FP16,
+    activation_bytes_per_element: int = BYTES_FP16,
+) -> int:
+    """
+    Compute the memory footprint for GPT-oss inference.
+
+    This function should account for:
+      1. Attention weights (W_q, W_k, W_v, W_o) -- same for all layers
+      2. MoE FFN weights (gate, up, down per expert * num_experts)
+      3. KV cache -- different for sliding vs full attention layers!
+         - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
+         - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
+
+    Hints:
+      - See get_llm_inference_mem_requirement() for the standard LLM calculation.
+      - See get_deepseek_inference_mem_requirement() for a MoE example.
+      - Remember to apply tensor parallelism (tp) to heads and dimensions.
+      - Remember to apply pipeline parallelism (pp) to num_layers.
+      - config.num_sliding_layers and config.num_full_layers give you the
+        layer counts for each attention type.
+
+    Args:
+        config: GPT-oss model configuration.
+        prefill_or_decode: "prefill" or "decode".
+        weight_bytes_per_element: Bytes per weight element (default BF16=2).
+        activation_bytes_per_element: Bytes per activation element (default BF16=2).
+
+    Returns:
+        Total memory requirement in bytes per chip.
+    """
+    # TODO: Implement memory footprint calculation for GPT-oss.
+    raise NotImplementedError("TODO: Implement get_gptoss_inference_mem_requirement")
 
 
 def get_deepseek_inference_mem_requirement(config: DeepSeekConfig, prefill_or_decode: str = "decode") -> int:

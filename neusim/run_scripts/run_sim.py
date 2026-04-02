@@ -19,6 +19,7 @@ from neusim.npusim.frontend.dlrm_ops_generator import DLRMOpsGenerator
 from neusim.npusim.frontend.llm_ops_generator import LLMOpsGeneratorBase, LLMOpsGeneratorTraining
 from neusim.npusim.frontend.llm_ops_generator import LLMOpsGeneratorInference
 from neusim.npusim.frontend.llm_ops_generator import DeepSeekOpsGenerator
+from neusim.npusim.frontend.llm_ops_generator import GptOssOpsGenerator
 
 
 models = flags.DEFINE_list(
@@ -132,8 +133,8 @@ def dump_stats_llm(v: str, base_config: dict[str, Any], ops_gen: LLMOpsGenerator
         decode_stats["throughput_tokens_per_sec"] = microbatch_size_ici * 1e9 / decode_pp_stage_time_ns
         decode_stats["throughput_tokens_per_sec_request"] = 1e3 / decode_stats["TPOT_ms_request"]
 
-        assert isinstance(ops_gen, (LLMOpsGeneratorInference, DeepSeekOpsGenerator)), \
-            f"ops_gen should be LLMOpsGeneratorInference or DeepSeekOpsGenerator, but got {type(ops_gen)}"
+        assert isinstance(ops_gen, (LLMOpsGeneratorInference, DeepSeekOpsGenerator, GptOssOpsGenerator)), \
+            f"ops_gen should be LLMOpsGeneratorInference, DeepSeekOpsGenerator, or GptOssOpsGenerator, but got {type(ops_gen)}"
         prefill_stats["mem_footprint_GB"] = ops_gen.compute_memory_footprint_bytes("prefill") / 1024 / 1024 / 1024
         prefill_stats["out_of_memory"] = (base_config["hbm_size_GB"] < prefill_stats["mem_footprint_GB"])
         decode_stats["mem_footprint_GB"] = ops_gen.compute_memory_footprint_bytes("decode") / 1024 / 1024 / 1024
@@ -272,7 +273,7 @@ def dump_stats_stable_diffusion(v: str, base_config: dict[str, Any], ops_gen: Di
 
 
 def dump_stats(model: str, v: str, base_config: dict[str, Any], ops_gen, workload: str = "inference"):
-    if "llama" in model.lower() or "deepseek" in model.lower():
+    if "llama" in model.lower() or "deepseek" in model.lower() or "gpt-oss" in model.lower():
         dump_stats_llm(v, base_config, ops_gen, workload)
     elif "dlrm" in model.lower():
         dump_stats_dlrm(v, base_config, ops_gen, workload)
@@ -375,8 +376,8 @@ def generate(
     ## Map parallelism degrees to physical ICI axes
     axes_mappings = run_sim_lib.map_parallelism_to_ici_axes(model, v, parallelism_config)
 
-    if "deepseek" in model.lower():
-        assert len(axes_mappings) == 4, f"DeepSeek model {model} v{v} should have 4 axes mappings (dp, tp, pp, ep), but got {len(axes_mappings)}"
+    if "deepseek" in model.lower() or "gpt-oss" in model.lower():
+        assert len(axes_mappings) == 4, f"MoE model {model} v{v} should have 4 axes mappings (dp, tp, pp, ep), but got {len(axes_mappings)}"
         dp_axes, tp_axes, pp_axes, ep_axes = axes_mappings
     else:
         assert len(axes_mappings) == 3, f"Model {model} v{v} should have 3 axes mappings (dp, tp, pp), but got {len(axes_mappings)}"
@@ -387,7 +388,7 @@ def generate(
     base_config["num_data_parallel_axes"] = dp_axes
     base_config["num_tensor_parallel_axes"] = tp_axes
     base_config["num_pipeline_parallel_axes"] = pp_axes
-    if "deepseek" in model.lower():
+    if "deepseek" in model.lower() or "gpt-oss" in model.lower():
         base_config["num_expert_parallel_axes"] = ep_axes
 
     ## create output dir
@@ -408,6 +409,13 @@ def generate(
             raise NotImplementedError("DeepSeek training is not supported yet")
         elif workload == "inference":
             ops_generator = DeepSeekOpsGenerator(base_config)
+        else:
+            raise ValueError(f"Invalid workload: {workload}")
+    elif "gpt-oss" in model.lower():
+        if workload == "training":
+            raise NotImplementedError("GPT-oss training is not supported yet")
+        elif workload == "inference":
+            ops_generator = GptOssOpsGenerator(base_config)
         else:
             raise ValueError(f"Invalid workload: {workload}")
     elif "dlrm" in model.lower():

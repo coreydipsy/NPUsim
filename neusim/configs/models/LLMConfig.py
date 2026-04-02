@@ -161,3 +161,47 @@ class DeepSeekConfig(MoELLMConfig):
 
     def __hash__(self) -> int:
         return super().__hash__()
+
+
+class GptOssConfig(MoELLMConfig):
+    '''
+    GPT-oss model configuration.
+    Extends MoELLMConfig with sliding window attention support.
+
+    GPT-oss-120b uses alternating attention patterns across its 36 layers:
+      - Even layers (0, 2, 4, ...): sliding window attention (window_size=128)
+      - Odd layers  (1, 3, 5, ...): full causal attention
+    '''
+
+    sliding_window_size: int = 128
+    '''Sliding window size in tokens for sliding attention layers.'''
+
+    layer_types: list[str] = []
+    '''
+    Per-layer attention type: "sliding_attention" or "full_attention".
+    Length must equal num_layers. If empty, defaults to alternating pattern
+    starting with sliding attention at layer 0.
+    '''
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        if not self.layer_types:
+            self.layer_types = [
+                "sliding_attention" if i % 2 == 0 else "full_attention"
+                for i in range(self.num_layers)
+            ]
+        assert len(self.layer_types) == self.num_layers, \
+            f"layer_types length ({len(self.layer_types)}) must equal num_layers ({self.num_layers})"
+
+    @property
+    def num_sliding_layers(self) -> int:
+        '''Returns the number of layers that use sliding window attention.'''
+        return sum(1 for t in self.layer_types if t == "sliding_attention")
+
+    @property
+    def num_full_layers(self) -> int:
+        '''Returns the number of layers that use full causal attention.'''
+        return sum(1 for t in self.layer_types if t == "full_attention")
+
+    def __hash__(self) -> int:
+        return super().__hash__()
