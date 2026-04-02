@@ -1471,7 +1471,87 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
             (num_routed_experts, etc.) are inherited from MoELLMConfig.
         """
         # TODO: Implement prefill ops generation for GPT-oss.
-        raise NotImplementedError("TODO: Implement generate_prefill_ops")
+
+        ops: list[Operator.Operator] = []
+        fusion_id = fusion_id_start
+        
+        # 1. RMSNorm (all layers)
+        ops.append(
+            ops_lib.create_unary_op(
+                input_shape=[self.batch_size, self.input_seqlen, d_model_parallel],
+                op_name="RMSNorm",
+                name="X_norm = RMSNorm(X)",
+                description="Fwd-Attention-encoder-Input_rmsnorm",
+                count=self.num_layers,
+                fusion_id=fusion_id,
+            )
+        )
+        fusion_id += 1
+
+        # 2. Full attention ops (for full-attention layers)
+        ops += ops_lib.create_multi_head_attention(
+            batch_size=self.batch_size,
+            input_seqlen=self.input_seqlen,
+            output_seqlen=self.output_seqlen,
+            decode_width=self.decode_width,
+            num_heads=self.num_heads,
+            d_model=self.d_model,
+            d_head=self.d_head,
+            config=self.config,
+            num_layers=self.num_full_layers,
+            fusion_id_start=fusion_id,
+            is_decode=False,
+            use_flash_attention=self.use_flash_attention,
+            tensor_parallelism_axes=self.tensor_parallelism_axes,
+            ici_bw_GBps=self.tp_ici_bw_GBps,
+            num_kv_heads=self.num_kv_heads,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        # 3. Sliding window attention ops (for sliding-attention layers)
+        ops += ops_lib.create_sliding_window_attention(
+            batch_size=self.batch_size,
+            q_seqlen=self.input_seqlen, # The KV sequence length is min(input_seqlen, sliding_window_size), and in the function we compare with q_seqlen
+            sliding_window_size=self.sliding_window_size,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            d_model=self.d_model,
+            d_head=self.d_head,
+            num_layers=self.num_sliding_layers,
+            config=self.config,
+            # they dont do dtype for the eisting one, so i am also not going to do it here
+            fusion_id_start=fusion_id,
+            is_decode=False,
+            description_prefix="Fwd-Attention-sliding-window-lebron", # used during tracefile generation
+            use_flash_attention=self.use_flash_attention,
+            tensor_parallelism_axes=self.tensor_parallelism_axes,
+            ici_bw_GBps=self.tp_ici_bw_GBps,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        # 4. MoE FFN ops (all layers)
+        ops += ops_lib.create_ffn(
+            batch_size=self.batch_size,
+            input_seqlen=self.input_seqlen,
+            output_seqlen=self.output_seqlen,
+            decode_width=self.decode_width,
+            d_model=self.d_model,
+            d_ff=self.d_ff,
+            config=self.config,
+            # TODO: currently assuming all layers are MoE layers.
+            # May want to separately model dense layers in DeepSeek models
+            # (aggregated activated moe_inter_dim is similar to the dense layers).
+            num_layers=self.num_layers,
+            ffn_type="deepseek_moe",
+            fusion_id_start=fusion_id,
+            tensor_parallelism_axes=self.expert_tensor_parallelism_axes,
+            is_decode=False,
+            expert_parallelism_axes=self.expert_parallelism_axes,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        return ops
+
 
     def generate_decode_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
         """
@@ -1495,8 +1575,89 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
             passed to create_sliding_window_attention() vs create_multi_head_attention()
             during decode.
         """
+        # not sure what the hints here are for, i thoguht we alr implemented the logic in the function itself
+        
         # TODO: Implement decode ops generation for GPT-oss.
-        raise NotImplementedError("TODO: Implement generate_decode_ops")
+        ops: list[Operator.Operator] = []
+        fusion_id = fusion_id_start
+        count = self.num_layers * self.output_seqlen # count = num_layers * output_seqlen (one iteration per output token per layer)
+
+        # 1. RMSNorm (all layers)
+        ops.append(
+            ops_lib.create_unary_op(
+                input_shape=[self.batch_size, self.decode_width, d_model_parallel],
+                op_name="RMSNorm",
+                name="X_norm = RMSNorm(X)",
+                description="Attention-serving-decode-Input_rmsnorm",
+                count=count,
+                fusion_id=fusion_id,
+            )
+        )
+        fusion_id += 1
+
+        # 2. Full attention ops (for full-attention layers)
+        ops += ops_lib.create_multi_head_attention(
+            batch_size=self.batch_size,
+            input_seqlen=self.input_seqlen,
+            output_seqlen=self.output_seqlen,
+            decode_width=self.decode_width,
+            num_heads=self.num_heads,
+            d_model=self.d_model,
+            d_head=self.d_head,
+            config=self.config,
+            num_layers=self.num_full_layers,
+            fusion_id_start=fusion_id,
+            is_decode=True,
+            use_flash_attention=self.use_flash_attention,
+            tensor_parallelism_axes=self.tensor_parallelism_axes,
+            ici_bw_GBps=self.tp_ici_bw_GBps,
+            num_kv_heads=self.num_kv_heads,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        # 3. Sliding window attention ops (for sliding-attention layers)
+        ops += ops_lib.create_sliding_window_attention(
+            batch_size=self.batch_size,
+            q_seqlen=self.input_seqlen, # The KV sequence length is min(input_seqlen, sliding_window_size), and in the function we compare with q_seqlen
+            sliding_window_size=self.sliding_window_size,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            d_model=self.d_model,
+            d_head=self.d_head,
+            num_layers=self.num_sliding_layers,
+            config=self.config,
+            # they dont do dtype for the eisting one, so i am also not going to do it here
+            fusion_id_start=fusion_id,
+            is_decode=True,
+            description_prefix="Decode-Attention-sliding-window-lebron", # used during tracefile generation
+            use_flash_attention=self.use_flash_attention,
+            tensor_parallelism_axes=self.tensor_parallelism_axes,
+            ici_bw_GBps=self.tp_ici_bw_GBps,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        # 4. MoE FFN ops (all layers)
+        ops += ops_lib.create_ffn(
+            batch_size=self.batch_size,
+            input_seqlen=self.input_seqlen,
+            output_seqlen=self.output_seqlen,
+            decode_width=self.decode_width,
+            d_model=self.d_model,
+            d_ff=self.d_ff,
+            config=self.config,
+            # TODO: currently assuming all layers are MoE layers.
+            # May want to separately model dense layers in DeepSeek models
+            # (aggregated activated moe_inter_dim is similar to the dense layers).
+            num_layers=self.num_layers,
+            ffn_type="deepseek_moe",
+            fusion_id_start=fusion_id,
+            tensor_parallelism_axes=self.expert_tensor_parallelism_axes,
+            expert_parallelism_axes=self.expert_parallelism_axes,
+            is_decode=True,
+        )
+        fusion_id = ops[-1].fusion_id + 1
+
+        return ops
 
     def generate(
         self,
