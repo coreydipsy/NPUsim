@@ -1448,6 +1448,37 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
         self.num_full_layers: int = self.config.num_full_layers
         """Number of layers using full causal attention."""
 
+        # parallelism shenanegans -------------------------------------------------------
+        self.expert_tensor_parallelism_degree: int = (
+            self.config.expert_tensor_parallelism_degree
+        )
+        """Expert tensor parallelism degree."""
+        self.expert_parallelism_degree: int = self.config.expert_parallelism_degree
+        """Expert parallelism degree."""
+        self.num_expert_parallelism_axes: int = self.config.num_expert_parallel_axes
+        """Number of physical axes for expert parallelism."""
+        self.num_expert_tensor_parallelism_axes: int = (
+            self.config.num_expert_tensor_parallel_axes
+        )
+        """Number of physical axes for expert tensor parallelism."""
+        self.expert_tensor_parallelism_axes: list[int] = [
+            1
+        ] * self.num_expert_tensor_parallelism_axes
+        """Dim size of each ICI expert tensor parallelism axis."""
+        self.expert_parallelism_axes: list[int] = [1] * self.num_expert_parallelism_axes
+        """Dim size of each ICI expert parallelism axis."""
+
+        if self.num_expert_tensor_parallelism_axes > 0:
+            self.expert_tensor_parallelism_axes = split_parallelism_degree(
+                self.expert_tensor_parallelism_degree,
+                self.num_expert_tensor_parallelism_axes,
+            )
+        if self.num_expert_parallelism_axes > 0:
+            self.expert_parallelism_axes = split_parallelism_degree(
+                self.expert_parallelism_degree, self.num_expert_parallelism_axes
+            )
+        #--------------------------------------------------------------------------------
+
     def generate_prefill_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
         """
         Generate prefill operators for GPT-oss.
@@ -1474,6 +1505,7 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
 
         ops: list[Operator.Operator] = []
         fusion_id = fusion_id_start
+        d_model_parallel = ceil(self.d_model / self.tensor_parallelism)
         
         # 1. RMSNorm (all layers)
         ops.append(
@@ -1581,6 +1613,7 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
         ops: list[Operator.Operator] = []
         fusion_id = fusion_id_start
         count = self.num_layers * self.output_seqlen # count = num_layers * output_seqlen (one iteration per output token per layer)
+        d_model_parallel = ceil(self.d_model / self.tensor_parallelism)
 
         # 1. RMSNorm (all layers)
         ops.append(
