@@ -272,12 +272,28 @@ def get_llm_inference_kv_cache_mem_requirement(
         num_kv_heads = config.num_kv_heads
         d_head = config.d_head
 
+        # tp logic
+        num_heads = ceil(config.num_heads / tp)
+
         # TODO: Compute the KV cache size for GPT-oss.
         # Full attention layers use the full seqlen for KV cache.
         # Sliding window layers use min(seqlen, sliding_window_size).
         # The total KV cache is the sum across both layer types.
-        raise NotImplementedError(
-            "TODO: Implement KV cache calculation for GptOssConfig")
+        num_full_layers = config.num_full_layers
+        num_sliding_layers = config.num_sliding_layers
+        
+        if tp <= num_kv_heads:
+            # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
+            kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2) * num_full_layers
+            # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * num_sliding_layers
+        else:
+            # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
+            kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2) * num_full_layers
+            # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2) * num_sliding_layers
+            
+        
     else:
         num_kv_heads = config.num_kv_heads
         d_head = config.d_head
@@ -323,7 +339,131 @@ def get_gptoss_inference_mem_requirement(
         Total memory requirement in bytes per chip.
     """
     # TODO: Implement memory footprint calculation for GPT-oss.
-    raise NotImplementedError("TODO: Implement get_gptoss_inference_mem_requirement")
+    assert isinstance(
+        config, GptOssConfig
+    ), f"Invalid config type: {type(config)}. Expected GptOssConfig you dumb dumb."
+
+    #--------------------------------from llm interence mem requirement----------------------------
+    # tp and pp
+    tp: int = config.tensor_parallelism_degree * config.tensor_parallel_degree_dcn
+    pp: int = config.pipeline_parallelism_degree * config.pipeline_parallel_degree_dcn
+
+    # global_batch_size = config.global_batch_size
+    # batch_size = ceil(global_batch_size / dp)
+    # per dp-ici replica batch size
+    batch_size = ceil(config.microbatch_size_ici / config.data_parallelism_degree)
+
+    num_heads: int = config.num_heads
+    num_kv_heads: int = config.num_kv_heads
+    if num_kv_heads == -1:
+        num_kv_heads = num_heads
+    d_head: int = config.d_head
+    d_model: int = config.d_model
+    d_ff: int = config.d_ff
+    num_layers: int = config.num_layers
+
+    num_heads = ceil(num_heads / tp)
+    num_kv_heads = ceil(num_kv_heads / tp)
+    d_ff = ceil(d_ff / tp)
+    num_layers_per_chip = ceil(num_layers / pp)
+    input_seqlen: int = config.input_seqlen
+    output_seqlen: int = config.output_seqlen
+    seqlen = input_seqlen + output_seqlen if prefill_or_decode == "decode" else input_seqlen
+
+    ### Model Weights:
+    
+    ### Attention Layer ###
+
+    # For GQA, if TP <= # of KV heads, then the KV cache is shared.
+    # Otherwise, the KV cache needs to be replicated across TP chips.
+    if tp <= num_kv_heads:
+        w_attn_kv = d_model * num_kv_heads * d_head * 2
+    else:
+        w_attn_kv = d_model * num_heads * d_head * 2
+    w_attn_q = d_model * num_heads * d_head
+    w_attn_qkv = w_attn_kv + w_attn_q
+    w_attn_output = num_heads * d_head * d_model
+    w_attn = w_attn_qkv + w_attn_output  # attention weights
+
+    a_attn_q = batch_size * seqlen * num_heads * d_head
+    # nuked out the kv stuff since it is calculated later
+
+    total_weights = (w_attn) * num_layers_per_chip
+    total_act = (a_attn_q) * num_layers_per_chip
+    total_mem_footprint_bytes = total_weights * weight_bytes_per_element + total_act * activation_bytes_per_element
+    #--------------------------------from llm interence mem requirement----------------------------
+
+    # -------------------------------from deepseek MoE weights-----------------
+    ### MoE FFN weights
+    bs = batch_size
+    ep = (
+        config.expert_parallelism_degree
+        * config.expert_parallel_degree_dcn
+    )
+    etp = config.expert_tensor_parallelism_degree
+    ffn_weight_elem_bytes = 1  # FP8
+    ffn_act_elem_bytes = 2  # BF16 intermediate and output
+    # TODO: we currently just assume all layers are MoE layers.
+    # Actually for DeepSeek models, the first few layers are dense layers.
+    # But they have larger d_ff than MoE experts, and should not impact
+    # our estimation of the memory footprint too much.
+    ffn_num_params = (
+        config.d_model
+        * config.moe_d_ff
+        * 3
+        / etp  # each expert has 3 matrices
+        * (config.num_shared_experts + config.num_routed_experts)
+        / ep  # total # of experts
+        * num_layers
+    )
+    moe_gate_params = (
+        config.num_routed_experts * config.d_model * num_layers
+    )
+    ffn_weight_bytes = (ffn_num_params + moe_gate_params) * ffn_weight_elem_bytes
+    total_mem_footprint_bytes += ffn_weight_bytes
+    # print(f"MoE FFN layer weights: {ffn_weight_bytes} bytes")
+
+    ### MoE FFN activations
+    # Only needs to account for the intermediate matrices in activated experts.
+    # The input and output matrices are already considered in MLA and KV cache.
+    # Specifically, need to allocate spaces for self.w1(x) and self.w3(x).
+    # Then w1(x) can be point-wise multiplied into w3(x) in place, and the result
+    # can be multipled with w2.
+    # We need to reserve space for the worst case token distribution:
+    #   All tokens are routed to the same expert group.
+    ffn_expert_act_bytes = (
+        bs * seqlen * config.moe_d_ff * 2 / etp
+    ) * ffn_act_elem_bytes
+    ffn_act_bytes = ffn_expert_act_bytes * num_layers
+    total_mem_footprint_bytes += ffn_act_bytes
+    # print(f"MoE FFN layer activations: {ffn_act_bytes} bytes")
+    # -------------------------------from deepseek MoE weights------------------
+
+    ## KV cache
+    # GPT-oss: sliding window layers have bounded KV cache
+    num_kv_heads = config.num_kv_heads
+    d_head = config.d_head
+
+    # tp logic
+    num_heads = ceil(config.num_heads / tp)
+    num_full_layers = config.num_full_layers
+    num_sliding_layers = config.num_sliding_layers
+    
+    if tp <= num_kv_heads:
+        # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
+        kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2) * num_full_layers
+        # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * num_sliding_layers
+    else:
+        # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
+        kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2) * num_full_layers
+        # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2) * num_sliding_layers
+
+    total_mem_footprint_bytes += kv_cache_bytes
+    return round(total_mem_footprint_bytes)
+
+
 
 
 def get_deepseek_inference_mem_requirement(config: DeepSeekConfig, prefill_or_decode: str = "decode") -> int:
