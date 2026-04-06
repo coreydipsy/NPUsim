@@ -1774,5 +1774,3 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
         return mem_footprint_lib.get_gptoss_inference_mem_requirement(
             self.config, prefill_or_decode=prefill_or_decode
         )
-
-        
