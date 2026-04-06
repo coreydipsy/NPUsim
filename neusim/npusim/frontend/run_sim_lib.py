@@ -209,7 +209,7 @@ def generate_parallelism_configs(num_chips: int, model: str, *args, **kwargs) ->
 
     if "llama" in model.lower():
         return generate_parallelism_configs_llm(num_chips, *args, **kwargs)
-    elif "deepseek" in model.lower():
+    elif "deepseek" in model.lower() or "gpt-oss" in model.lower():
         return generate_parallelism_configs_llm_moe(num_chips, *args, **kwargs)
     elif "dlrm" in model.lower():
         return generate_parallelism_configs_dlrm(num_chips, *args, **kwargs)

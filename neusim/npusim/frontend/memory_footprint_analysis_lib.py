@@ -276,8 +276,20 @@ def get_llm_inference_kv_cache_mem_requirement(
         # Full attention layers use the full seqlen for KV cache.
         # Sliding window layers use min(seqlen, sliding_window_size).
         # The total KV cache is the sum across both layer types.
-        raise NotImplementedError(
-            "TODO: Implement KV cache calculation for GptOssConfig")
+        num_heads = ceil(config.num_heads / tp)
+        num_full_layers = config.num_full_layers
+        num_sliding_layers = config.num_sliding_layers
+
+        if tp <= num_kv_heads:
+            # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
+            kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2) * num_full_layers
+            # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2 * BYTES_FP16) * num_sliding_layers 
+        else:
+            # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
+            kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2) * num_full_layers
+            # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2 * BYTES_FP16) * num_sliding_layers
     else:
         num_kv_heads = config.num_kv_heads
         d_head = config.d_head
