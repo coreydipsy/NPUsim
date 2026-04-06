@@ -362,11 +362,9 @@ def get_gptoss_inference_mem_requirement(
     num_layers: int = config.num_layers
 
     num_heads = ceil(num_heads / tp)
-    if tp <= num_kv_heads:
-        num_kv_heads = ceil(num_kv_heads / tp)
-    else:
-        num_kv_heads = num_heads
-
+    num_kv_heads = ceil(num_kv_heads / tp)
+    d_ff = ceil(d_ff / tp)
+    num_layers_per_chip = ceil(num_layers / pp)
     input_seqlen: int = config.input_seqlen
     output_seqlen: int = config.output_seqlen
     seqlen = input_seqlen + output_seqlen if prefill_or_decode == "decode" else input_seqlen
@@ -377,7 +375,10 @@ def get_gptoss_inference_mem_requirement(
 
     # For GQA, if TP <= # of KV heads, then the KV cache is shared.
     # Otherwise, the KV cache needs to be replicated across TP chips.
-    w_attn_kv = d_model * num_kv_heads * d_head * 2
+    if tp <= num_kv_heads:
+        w_attn_kv = d_model * num_kv_heads * d_head * 2
+    else:
+        w_attn_kv = d_model * num_heads * d_head * 2
     w_attn_q = d_model * num_heads * d_head
     w_attn_qkv = w_attn_kv + w_attn_q
     w_attn_output = num_heads * d_head * d_model
@@ -386,6 +387,9 @@ def get_gptoss_inference_mem_requirement(
     a_attn_q = batch_size * seqlen * num_heads * d_head
     # nuked out the kv stuff since it is calculated later
 
+    total_weights = (w_attn) * num_layers_per_chip
+    total_act = (a_attn_q) * num_layers_per_chip
+    total_mem_footprint_bytes = total_weights * weight_bytes_per_element + total_act * activation_bytes_per_element
     #--------------------------------from llm interence mem requirement----------------------------
 
     # -------------------------------from deepseek MoE weights-----------------
@@ -396,6 +400,8 @@ def get_gptoss_inference_mem_requirement(
         * config.expert_parallel_degree_dcn
     )
     etp = config.expert_tensor_parallelism_degree
+    ffn_weight_elem_bytes = 2  # we use BF 16 now
+    ffn_act_elem_bytes = 2  # BF16 intermediate and output
     # TODO: we currently just assume all layers are MoE layers.
     # Actually for DeepSeek models, the first few layers are dense layers.
     # But they have larger d_ff than MoE experts, and should not impact
@@ -407,10 +413,14 @@ def get_gptoss_inference_mem_requirement(
         / etp  # each expert has 3 matrices
         * (config.num_shared_experts + config.num_routed_experts)
         / ep  # total # of experts
+        * num_layers
     )
     moe_gate_params = (
-        config.num_routed_experts * config.d_model
+        config.num_routed_experts * config.d_model * num_layers
     )
+    ffn_weight_bytes = (ffn_num_params + moe_gate_params) * ffn_weight_elem_bytes
+    total_mem_footprint_bytes += ffn_weight_bytes
+    # print(f"MoE FFN layer weights: {ffn_weight_bytes} bytes")
 
     ### MoE FFN activations
     # Only needs to account for the intermediate matrices in activated experts.
@@ -420,56 +430,39 @@ def get_gptoss_inference_mem_requirement(
     # can be multipled with w2.
     # We need to reserve space for the worst case token distribution:
     #   All tokens are routed to the same expert group.
-    ffn_expert_act = (
+    ffn_expert_act_bytes = (
         bs * seqlen * config.moe_d_ff * 2 / etp
-    )
+    ) * ffn_act_elem_bytes
+    ffn_act_bytes = ffn_expert_act_bytes * num_layers
+    total_mem_footprint_bytes += ffn_act_bytes
+    # print(f"MoE FFN layer activations: {ffn_act_bytes} bytes")
     # -------------------------------from deepseek MoE weights------------------
 
     ## KV cache
     # GPT-oss: sliding window layers have bounded KV cache
+    num_kv_heads = config.num_kv_heads
+    d_head = config.d_head
 
-    num_stages = max(pp, 1)
-    base_layers_per_stage = config.num_layers // num_stages
-    extra_layers = config.num_layers % num_stages
+    # tp logic
+    num_heads = ceil(config.num_heads / tp)
+    num_full_layers = config.num_full_layers
+    num_sliding_layers = config.num_sliding_layers
+    
+    if tp <= num_kv_heads:
+        # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2 (for both K and V) * 2 (again for BF 16)
+        kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2 * 2) * num_full_layers
+        # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2 * 2) * num_sliding_layers
+    else:
+        # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
+        kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2 * 2) * num_full_layers
+        # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2 * 2) * num_sliding_layers
 
-    total_mem_footprint_bytes = 0
-    start_idx = 0
-
-    for stage_idx in range(num_stages):
-        local_num_layers = base_layers_per_stage + (1 if stage_idx < extra_layers else 0)
-        local_layer_types = config.layer_types[start_idx:start_idx + local_num_layers]
-        start_idx += local_num_layers
-
-        local_num_full_layers = sum(
-            1 for layer_type in local_layer_types if layer_type == "full_attention"
-        )
-        local_num_sliding_layers = sum(
-            1 for layer_type in local_layer_types if layer_type == "sliding_attention"
-        )
-
-        total_weights = (
-            w_attn * local_num_layers
-            + (ffn_num_params + moe_gate_params) * local_num_layers
-        )
-
-        total_act = (
-            a_attn_q * local_num_layers
-            + ffn_expert_act * local_num_layers
-            + (bs * seqlen * num_kv_heads * d_head * 2) * local_num_full_layers
-            + (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * local_num_sliding_layers
-        )
-
-        stage_mem_footprint_bytes = (
-            total_weights * weight_bytes_per_element
-            + total_act * activation_bytes_per_element
-        )
-
-        total_mem_footprint_bytes = max(
-            total_mem_footprint_bytes,
-            stage_mem_footprint_bytes
-        )
-
+    total_mem_footprint_bytes += kv_cache_bytes
     return round(total_mem_footprint_bytes)
+
+
 
 
 def get_deepseek_inference_mem_requirement(config: DeepSeekConfig, prefill_or_decode: str = "decode") -> int:
