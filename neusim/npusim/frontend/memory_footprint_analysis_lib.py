@@ -283,15 +283,15 @@ def get_llm_inference_kv_cache_mem_requirement(
         num_sliding_layers = config.num_sliding_layers
         
         if tp <= num_kv_heads:
-            # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
-            kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2) * num_full_layers
+            # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2 (for both K and V) * 2 (again for BF 16)
+            kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2 * 2) * num_full_layers
             # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
-            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * num_sliding_layers
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2 * 2) * num_sliding_layers
         else:
             # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
-            kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2) * num_full_layers
+            kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2 * 2) * num_full_layers
             # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
-            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2) * num_sliding_layers
+            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2 * 2) * num_sliding_layers
             
         
     else:
@@ -401,7 +401,7 @@ def get_gptoss_inference_mem_requirement(
         * config.expert_parallel_degree_dcn
     )
     etp = config.expert_tensor_parallelism_degree
-    ffn_weight_elem_bytes = 1  # FP8
+    ffn_weight_elem_bytes = 2  # we use BF 16 now
     ffn_act_elem_bytes = 2  # BF16 intermediate and output
     # TODO: we currently just assume all layers are MoE layers.
     # Actually for DeepSeek models, the first few layers are dense layers.
@@ -450,15 +450,15 @@ def get_gptoss_inference_mem_requirement(
     num_sliding_layers = config.num_sliding_layers
     
     if tp <= num_kv_heads:
-        # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
-        kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2) * num_full_layers
+        # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2 (for both K and V) * 2 (again for BF 16)
+        kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2 * 2) * num_full_layers
         # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
-        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * num_sliding_layers
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2 * 2) * num_sliding_layers
     else:
         # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
-        kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2) * num_full_layers
+        kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2 * 2) * num_full_layers
         # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
-        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2) * num_sliding_layers
+        kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2 * 2) * num_sliding_layers
 
     total_mem_footprint_bytes += kv_cache_bytes
     return round(total_mem_footprint_bytes)
