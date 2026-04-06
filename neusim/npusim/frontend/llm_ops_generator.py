@@ -1771,4 +1771,6 @@ class GptOssOpsGenerator(LLMOpsGeneratorBase):
             (gate + up + down projections per expert).
         """
         # TODO: Implement memory footprint calculation.
-        raise NotImplementedError("TODO: Implement compute_memory_footprint_bytes")
+        return mem_footprint_lib.get_gptoss_inference_mem_requirement(
+            self.config, prefill_or_decode=prefill_or_decode
+        )
