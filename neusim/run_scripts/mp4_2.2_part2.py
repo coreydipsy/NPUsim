@@ -25,6 +25,7 @@ import sys
 import tempfile
 
 NEUSIM_ROOT = Path(__file__).resolve().parent.parent.parent
+SCRIPT_STEM = Path(__file__).stem
 if str(NEUSIM_ROOT) not in sys.path:
     sys.path.insert(0, str(NEUSIM_ROOT))
 
@@ -36,7 +37,7 @@ from neusim.npusim.frontend.run_single_op import run_sim_single_op
 
 DEFAULT_MODEL = NEUSIM_ROOT / "configs/models/gpt-oss-20b.json"
 DEFAULT_CHIP = NEUSIM_ROOT / "configs/chips/tpuv5p.json"
-DEFAULT_OUTPUT_DIR = NEUSIM_ROOT / "results/attn_compare"
+DEFAULT_OUTPUT_DIR = NEUSIM_ROOT / f"results/{SCRIPT_STEM}"
 DEFAULT_SEQ_LENS = [512, 1024, 2048, 4096, 8192]
 
 
@@ -276,12 +277,12 @@ def _plot_with_svg(rows: list[dict[str, float | int]], output_path: Path) -> Non
 
 
 def _plot(rows: list[dict[str, float | int]], output_dir: Path) -> Path:
-    png_path = output_dir / "attention_compare.png"
+    png_path = output_dir / f"{SCRIPT_STEM}.png"
     try:
         _plot_with_matplotlib(rows, png_path)
         return png_path
     except ModuleNotFoundError:
-        svg_path = output_dir / "attention_compare.svg"
+        svg_path = output_dir / f"{SCRIPT_STEM}.svg"
         _plot_with_svg(rows, svg_path)
         return svg_path
 
@@ -359,7 +360,7 @@ def main() -> None:
             }
         )
 
-    csv_path = output_dir / "attention_compare.csv"
+    csv_path = output_dir / f"{SCRIPT_STEM}.csv"
     _write_csv(rows, csv_path)
     plot_path = _plot(rows, output_dir)
 

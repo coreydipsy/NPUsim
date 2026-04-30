@@ -1,0 +1,1430 @@
+diff --git a/configs/models/gpt-oss-120b.json b/configs/models/gpt-oss-120b.json
+new file mode 100644
+index 0000000..3f6e8d5
+--- /dev/null
++++ b/configs/models/gpt-oss-120b.json
+@@ -0,0 +1,42 @@
++{
++    "model_name": "gpt-oss-120b",
++    "model_type": "llm",
++    "global_batch_size": 1,
++    "input_seqlen": 4096,
++    "output_seqlen": 512,
++    "decode_width": 1,
++    "d_model": 2880,
++    "num_heads": 64,
++    "num_kv_heads": 8,
++    "d_head": 64,
++    "d_ff": 2880,
++    "num_layers": 36,
++    "ffn_type": "llama",
++    "use_flash_attention": true,
++
++    "sliding_window_size": 128,
++
++    "router_type": "topk",
++    "num_shared_experts": 0,
++    "num_routed_experts": 128,
++    "num_activated_routed_experts_per_token": 4,
++    "num_limited_groups": 1,
++    "moe_d_ff": 2880,
++
++    "data_parallelism_degree": 1,
++    "tensor_parallelism_degree": 1,
++    "pipeline_parallelism_degree": 1,
++    "expert_parallelism_degree": 1,
++    "num_data_parallel_axes": 0,
++    "num_tensor_parallel_axes": 0,
++    "num_pipeline_parallel_axes": 0,
++    "num_expert_parallel_axes": 0,
++    "data_parallel_degree_dcn": 1,
++    "tensor_parallel_degree_dcn": 1,
++    "pipeline_parallel_degree_dcn": 1,
++    "expert_parallel_degree_dcn": 1,
++    "microbatch_size_dcn": 1,
++    "microbatch_size_ici": 1,
++    "num_chips": 1,
++    "output_file_path": "v2.csv"
++}
+diff --git a/configs/models/gpt-oss-20b.json b/configs/models/gpt-oss-20b.json
+new file mode 100644
+index 0000000..1abb02f
+--- /dev/null
++++ b/configs/models/gpt-oss-20b.json
+@@ -0,0 +1,39 @@
++{
++    "model_name": "gpt-oss-20b",
++    "model_type": "llm",
++    "global_batch_size": 1,
++    "input_seqlen": 4096,
++    "output_seqlen": 512,
++    "decode_width": 1,
++    "d_model": 2880,
++    "num_heads": 64,
++    "num_kv_heads": 8,
++    "d_head": 64,
++    "d_ff": 2880,
++    "num_layers": 24,
++    "ffn_type": "llama",
++    "use_flash_attention": true,
++    "sliding_window_size": 128,
++    "router_type": "topk",
++    "num_shared_experts": 0,
++    "num_routed_experts": 32,
++    "num_activated_routed_experts_per_token": 4,
++    "num_limited_groups": 1,
++    "moe_d_ff": 2880,
++    "data_parallelism_degree": 1,
++    "tensor_parallelism_degree": 1,
++    "pipeline_parallelism_degree": 1,
++    "expert_parallelism_degree": 1,
++    "num_data_parallel_axes": 0,
++    "num_tensor_parallel_axes": 0,
++    "num_pipeline_parallel_axes": 0,
++    "num_expert_parallel_axes": 0,
++    "data_parallel_degree_dcn": 1,
++    "tensor_parallel_degree_dcn": 1,
++    "pipeline_parallel_degree_dcn": 1,
++    "expert_parallel_degree_dcn": 1,
++    "microbatch_size_dcn": 1,
++    "microbatch_size_ici": 1,
++    "num_chips": 1,
++    "output_file_path": "v2.csv"
++}
+diff --git a/neusim/configs/models/LLMConfig.py b/neusim/configs/models/LLMConfig.py
+index 977639a..077494d 100644
+--- a/neusim/configs/models/LLMConfig.py
++++ b/neusim/configs/models/LLMConfig.py
+@@ -161,3 +161,47 @@ class DeepSeekConfig(MoELLMConfig):
+ 
+     def __hash__(self) -> int:
+         return super().__hash__()
++
++
++class GptOssConfig(MoELLMConfig):
++    '''
++    GPT-oss model configuration.
++    Extends MoELLMConfig with sliding window attention support.
++
++    GPT-oss-120b uses alternating attention patterns across its 36 layers:
++      - Even layers (0, 2, 4, ...): sliding window attention (window_size=128)
++      - Odd layers  (1, 3, 5, ...): full causal attention
++    '''
++
++    sliding_window_size: int = 128
++    '''Sliding window size in tokens for sliding attention layers.'''
++
++    layer_types: list[str] = []
++    '''
++    Per-layer attention type: "sliding_attention" or "full_attention".
++    Length must equal num_layers. If empty, defaults to alternating pattern
++    starting with sliding attention at layer 0.
++    '''
++
++    def __init__(self, **kwargs):
++        super().__init__(**kwargs)
++        if not self.layer_types:
++            self.layer_types = [
++                "sliding_attention" if i % 2 == 0 else "full_attention"
++                for i in range(self.num_layers)
++            ]
++        assert len(self.layer_types) == self.num_layers, \
++            f"layer_types length ({len(self.layer_types)}) must equal num_layers ({self.num_layers})"
++
++    @property
++    def num_sliding_layers(self) -> int:
++        '''Returns the number of layers that use sliding window attention.'''
++        return sum(1 for t in self.layer_types if t == "sliding_attention")
++
++    @property
++    def num_full_layers(self) -> int:
++        '''Returns the number of layers that use full causal attention.'''
++        return sum(1 for t in self.layer_types if t == "full_attention")
++
++    def __hash__(self) -> int:
++        return super().__hash__()
+diff --git a/neusim/npusim/frontend/llm_ops_generator.py b/neusim/npusim/frontend/llm_ops_generator.py
+index 4bc0295..fb8ee21 100644
+--- a/neusim/npusim/frontend/llm_ops_generator.py
++++ b/neusim/npusim/frontend/llm_ops_generator.py
+@@ -12,6 +12,7 @@ import neusim.npusim.frontend.Operator as Operator
+ import neusim.npusim.frontend.power_analysis_lib as power_lib
+ from neusim.configs.models.LLMConfig import (
+     DeepSeekConfig,
++    GptOssConfig,
+     LLMConfig,
+ )
+ 
+@@ -1409,3 +1410,367 @@ class DeepSeekOpsGenerator(LLMOpsGeneratorBase):
+         # print(f"KV+PE cache: {kv_cache_bytes} bytes")
+ 
+         return round(total_mem_footprint_bytes)
++
++
++class GptOssOpsGenerator(LLMOpsGeneratorBase):
++    """
++    GPT-oss model ops generator for inference.
++
++    GPT-oss-120b is a sparse MoE model (128 experts, top-4 routing) that uses
++    alternating sliding window / full attention across its 36 layers:
++      - Even layers (0, 2, 4, ...): sliding window attention (window=128 tokens)
++      - Odd layers  (1, 3, 5, ...): full causal attention
++
++    This generator produces separate op groups for the two attention types,
++    since they have different KV sequence lengths and thus different compute
++    and memory characteristics.
++
++    Architecture reference: https://arxiv.org/abs/2508.10925
++    """
++
++    def __init__(self, config: dict[str, Any] | GptOssConfig):
++        super().__init__(config)
++        if isinstance(config, dict):
++            self.config = GptOssConfig.model_validate(config)
++        if not isinstance(self.config, GptOssConfig):
++            raise TypeError(
++                "config must be a dict or an instance of GptOssConfig, "
++                f"got self.config={type(self.config)}. input config={type(config)}."
++            )
++
++        # Sliding window parameters
++        self.sliding_window_size: int = self.config.sliding_window_size
++        """Sliding window size for sliding attention layers."""
++        self.layer_types: list[str] = self.config.layer_types
++        """Per-layer attention type list."""
++        self.num_sliding_layers: int = self.config.num_sliding_layers
++        """Number of layers using sliding window attention."""
++        self.num_full_layers: int = self.config.num_full_layers
++        """Number of layers using full causal attention."""
++
++        # parallelism shenanegans -------------------------------------------------------
++        self.expert_tensor_parallelism_degree: int = (
++            self.config.expert_tensor_parallelism_degree
++        )
++        """Expert tensor parallelism degree."""
++        self.expert_parallelism_degree: int = self.config.expert_parallelism_degree
++        """Expert parallelism degree."""
++        self.num_expert_parallelism_axes: int = self.config.num_expert_parallel_axes
++        """Number of physical axes for expert parallelism."""
++        self.num_expert_tensor_parallelism_axes: int = (
++            self.config.num_expert_tensor_parallel_axes
++        )
++        """Number of physical axes for expert tensor parallelism."""
++        self.expert_tensor_parallelism_axes: list[int] = [
++            1
++        ] * self.num_expert_tensor_parallelism_axes
++        """Dim size of each ICI expert tensor parallelism axis."""
++        self.expert_parallelism_axes: list[int] = [1] * self.num_expert_parallelism_axes
++        """Dim size of each ICI expert parallelism axis."""
++
++        if self.num_expert_tensor_parallelism_axes > 0:
++            self.expert_tensor_parallelism_axes = split_parallelism_degree(
++                self.expert_tensor_parallelism_degree,
++                self.num_expert_tensor_parallelism_axes,
++            )
++        if self.num_expert_parallelism_axes > 0:
++            self.expert_parallelism_axes = split_parallelism_degree(
++                self.expert_parallelism_degree, self.num_expert_parallelism_axes
++            )
++        #--------------------------------------------------------------------------------
++
++    def generate_prefill_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
++        """
++        Generate prefill operators for GPT-oss.
++
++        The prefill phase processes the entire input prompt in one pass.
++        For GPT-oss, this means generating:
++          1. RMSNorm (all layers)
++          2. Full attention ops (for full-attention layers)
++          3. Sliding window attention ops (for sliding-attention layers)
++             - The KV sequence length is min(input_seqlen, sliding_window_size)
++          4. MoE FFN ops (all layers)
++
++        Hints:
++          - Look at how DeepSeekOpsGenerator.generate_prefill_ops() is structured.
++          - For sliding window layers, use create_sliding_window_attention() from
++            llm_ops_lib.py with num_layers=self.num_sliding_layers.
++          - For full attention layers, use create_multi_head_attention() with
++            num_layers=self.num_full_layers.
++          - For MoE FFN, reuse the DeepSeek MoE FFN by passing
++            ffn_type="deepseek_moe" to create_ffn(). The MoE config fields
++            (num_routed_experts, etc.) are inherited from MoELLMConfig.
++        """
++        # TODO: Implement prefill ops generation for GPT-oss.
++
++        ops: list[Operator.Operator] = []
++        fusion_id = fusion_id_start
++        d_model_parallel = ceil(self.d_model / self.tensor_parallelism)
++        
++        # 1. RMSNorm (all layers)
++        ops.append(
++            ops_lib.create_unary_op(
++                input_shape=[self.batch_size, self.input_seqlen, d_model_parallel],
++                op_name="RMSNorm",
++                name="X_norm = RMSNorm(X)",
++                description="Fwd-Attention-encoder-Input_rmsnorm",
++                count=self.num_layers,
++                fusion_id=fusion_id,
++            )
++        )
++        fusion_id += 1
++
++        # 2. Full attention ops (for full-attention layers)
++        ops += ops_lib.create_multi_head_attention(
++            batch_size=self.batch_size,
++            input_seqlen=self.input_seqlen,
++            output_seqlen=self.output_seqlen,
++            decode_width=self.decode_width,
++            num_heads=self.num_heads,
++            d_model=self.d_model,
++            d_head=self.d_head,
++            config=self.config,
++            num_layers=self.num_full_layers,
++            fusion_id_start=fusion_id,
++            is_decode=False,
++            use_flash_attention=self.use_flash_attention,
++            tensor_parallelism_axes=self.tensor_parallelism_axes,
++            ici_bw_GBps=self.tp_ici_bw_GBps,
++            num_kv_heads=self.num_kv_heads,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        # 3. Sliding window attention ops (for sliding-attention layers)
++        ops += ops_lib.create_sliding_window_attention(
++            batch_size=self.batch_size,
++            q_seqlen=self.input_seqlen, # The KV sequence length is min(input_seqlen, sliding_window_size), and in the function we compare with q_seqlen
++            sliding_window_size=self.sliding_window_size,
++            num_heads=self.num_heads,
++            num_kv_heads=self.num_kv_heads,
++            d_model=self.d_model,
++            d_head=self.d_head,
++            num_layers=self.num_sliding_layers,
++            config=self.config,
++            # they dont do dtype for the eisting one, so i am also not going to do it here
++            fusion_id_start=fusion_id,
++            is_decode=False,
++            description_prefix="Fwd-Attention-sliding-window-lebron", # used during tracefile generation
++            use_flash_attention=self.use_flash_attention,
++            tensor_parallelism_axes=self.tensor_parallelism_axes,
++            ici_bw_GBps=self.tp_ici_bw_GBps,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        # 4. MoE FFN ops (all layers)
++        ops += ops_lib.create_ffn(
++            batch_size=self.batch_size,
++            input_seqlen=self.input_seqlen,
++            output_seqlen=self.output_seqlen,
++            decode_width=self.decode_width,
++            d_model=self.d_model,
++            d_ff=self.d_ff,
++            config=self.config,
++            # TODO: currently assuming all layers are MoE layers.
++            # May want to separately model dense layers in DeepSeek models
++            # (aggregated activated moe_inter_dim is similar to the dense layers).
++            num_layers=self.num_layers,
++            ffn_type="deepseek_moe",
++            fusion_id_start=fusion_id,
++            tensor_parallelism_axes=self.expert_tensor_parallelism_axes,
++            is_decode=False,
++            expert_parallelism_axes=self.expert_parallelism_axes,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        return ops
++
++
++    def generate_decode_ops(self, fusion_id_start: int = 2) -> list[Operator.Operator]:
++        """
++        Generate decode operators for GPT-oss.
++
++        The decode phase generates tokens one at a time (autoregressive).
++        Each decode step produces decode_width tokens and attends to the
++        full KV cache built up so far.
++
++        Key difference from prefill:
++          - count = num_layers * output_seqlen (one iteration per output token per layer)
++          - For full attention layers: KV cache spans input_seqlen + output_seqlen
++          - For sliding window layers: KV cache is BOUNDED at sliding_window_size
++            tokens. This is the main memory saving -- old entries beyond the window
++            are evicted, so the cache never grows larger than the window.
++
++        Hints:
++          - For sliding window decode, the KV cache length is just
++            sliding_window_size (not input_seqlen + output_seqlen).
++          - Think carefully about what input_seqlen and output_seqlen mean when
++            passed to create_sliding_window_attention() vs create_multi_head_attention()
++            during decode.
++        """
++        # not sure what the hints here are for, i thoguht we alr implemented the logic in the function itself
++        
++        # TODO: Implement decode ops generation for GPT-oss.
++        ops: list[Operator.Operator] = []
++        fusion_id = fusion_id_start
++        count = self.num_layers * self.output_seqlen # count = num_layers * output_seqlen (one iteration per output token per layer)
++        d_model_parallel = ceil(self.d_model / self.tensor_parallelism)
++
++        # 1. RMSNorm (all layers)
++        ops.append(
++            ops_lib.create_unary_op(
++                input_shape=[self.batch_size, self.decode_width, d_model_parallel],
++                op_name="RMSNorm",
++                name="X_norm = RMSNorm(X)",
++                description="Attention-serving-decode-Input_rmsnorm",
++                count=count,
++                fusion_id=fusion_id,
++            )
++        )
++        fusion_id += 1
++
++        # 2. Full attention ops (for full-attention layers)
++        ops += ops_lib.create_multi_head_attention(
++            batch_size=self.batch_size,
++            input_seqlen=self.input_seqlen,
++            output_seqlen=self.output_seqlen,
++            decode_width=self.decode_width,
++            num_heads=self.num_heads,
++            d_model=self.d_model,
++            d_head=self.d_head,
++            config=self.config,
++            num_layers=self.num_full_layers,
++            fusion_id_start=fusion_id,
++            is_decode=True,
++            use_flash_attention=self.use_flash_attention,
++            tensor_parallelism_axes=self.tensor_parallelism_axes,
++            ici_bw_GBps=self.tp_ici_bw_GBps,
++            num_kv_heads=self.num_kv_heads,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        # 3. Sliding window attention ops (for sliding-attention layers)
++        ops += ops_lib.create_sliding_window_attention(
++            batch_size=self.batch_size,
++            q_seqlen=self.input_seqlen, # The KV sequence length is min(input_seqlen, sliding_window_size), and in the function we compare with q_seqlen
++            sliding_window_size=self.sliding_window_size,
++            num_heads=self.num_heads,
++            num_kv_heads=self.num_kv_heads,
++            d_model=self.d_model,
++            d_head=self.d_head,
++            num_layers=self.num_sliding_layers,
++            config=self.config,
++            # they dont do dtype for the eisting one, so i am also not going to do it here
++            fusion_id_start=fusion_id,
++            is_decode=True,
++            description_prefix="Decode-Attention-sliding-window-lebron", # used during tracefile generation
++            use_flash_attention=self.use_flash_attention,
++            tensor_parallelism_axes=self.tensor_parallelism_axes,
++            ici_bw_GBps=self.tp_ici_bw_GBps,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        # 4. MoE FFN ops (all layers)
++        ops += ops_lib.create_ffn(
++            batch_size=self.batch_size,
++            input_seqlen=self.input_seqlen,
++            output_seqlen=self.output_seqlen,
++            decode_width=self.decode_width,
++            d_model=self.d_model,
++            d_ff=self.d_ff,
++            config=self.config,
++            # TODO: currently assuming all layers are MoE layers.
++            # May want to separately model dense layers in DeepSeek models
++            # (aggregated activated moe_inter_dim is similar to the dense layers).
++            num_layers=self.num_layers,
++            ffn_type="deepseek_moe",
++            fusion_id_start=fusion_id,
++            tensor_parallelism_axes=self.expert_tensor_parallelism_axes,
++            expert_parallelism_axes=self.expert_parallelism_axes,
++            is_decode=True,
++        )
++        fusion_id = ops[-1].fusion_id + 1
++
++        return ops
++
++    def generate(
++        self,
++        fusion_id_start: int = 2,
++        dump_to_file: bool = True,
++        separate_prefill_decode: bool = True,
++        analyze_energy: bool = True,
++        **kwargs,
++    ) -> list[Operator.Operator] | tuple[list[Operator.Operator], ...]:
++        prefill_ops = self.generate_prefill_ops(fusion_id_start=fusion_id_start)
++        decode_ops = self.generate_decode_ops(
++            fusion_id_start=prefill_ops[-1].fusion_id + 1
++        )
++        ops = prefill_ops + decode_ops
++
++        ops = analysis_lib.fill_operators_execution_info(ops, self.config, analyze_energy=analyze_energy)
++
++        if dump_to_file:
++            self.dump_to_file(separate_prefill_decode, ops, prefill_ops, decode_ops)
++
++        if separate_prefill_decode:
++            return ops, prefill_ops, decode_ops
++        else:
++            return ops
++
++    def dump_to_file(self, separate_prefill_decode: bool, ops: list[Operator.Operator], prefill_ops: list[Operator.Operator], decode_ops: list[Operator.Operator]):
++        logging.info(
++            "Generating GPT-oss ops and dumping to %s.",
++            os.path.abspath(self.output_file_path),
++        )
++        if separate_prefill_decode:
++            prefill_ops_dict = [Operator.to_csv_dict(op) for op in prefill_ops]
++            decode_ops_dict = [Operator.to_csv_dict(op) for op in decode_ops]
++            with open(
++                self.output_file_path.replace(".csv", "_prefill.csv"), "w"
++            ) as f:
++                writer = csv.DictWriter(f, fieldnames=prefill_ops_dict[0].keys())
++                writer.writeheader()
++                writer.writerows(prefill_ops_dict)
++            with open(
++                self.output_file_path.replace(".csv", "_decode.csv"), "w"
++            ) as f:
++                writer = csv.DictWriter(f, fieldnames=decode_ops_dict[0].keys())
++                writer.writeheader()
++                writer.writerows(decode_ops_dict)
++        ops_dict = [Operator.to_csv_dict(op) for op in ops]
++        with open(self.output_file_path, "w") as f:
++            writer = csv.DictWriter(f, fieldnames=ops_dict[0].keys())
++            writer.writeheader()
++            writer.writerows(ops_dict)
++
++    def compute_memory_footprint_bytes(self, prefill_or_decode: str = "decode") -> int:
++        """
++        Compute the memory footprint of GPT-oss inference in bytes.
++
++        The memory footprint consists of:
++          1. Model weights (attention projections + MoE expert weights + router)
++             - Same for all layers regardless of attention type
++          2. KV cache
++             - Full attention layers: KV cache spans the full sequence
++             - Sliding attention layers: KV cache is BOUNDED at sliding_window_size
++             - This is the key difference from standard LLM memory footprint!
++
++        For reference, at 128k context with 128-token window:
++          - Full attention KV cache per layer: B * 131072 * num_kv_heads * d_head * 2
++          - Sliding window KV cache per layer: B * 128 * num_kv_heads * d_head * 2
++          - That's ~1000x reduction in KV cache for sliding layers!
++
++        Hints:
++          - Look at get_llm_inference_mem_requirement() in
++            memory_footprint_analysis_lib.py for how the standard LLM memory
++            footprint is computed.
++          - You need to split the KV cache calculation: full_layers use full
++            seqlen, sliding_layers use min(seqlen, sliding_window_size).
++          - Weight memory is the same for both layer types (the W_q, W_k, W_v,
++            W_o projection matrices have the same shapes regardless of window size).
++          - For MoE weights, you can compute: num_experts * 3 * d_model * moe_d_ff
++            (gate + up + down projections per expert).
++        """
++        # TODO: Implement memory footprint calculation.
++        return mem_footprint_lib.get_gptoss_inference_mem_requirement(
++            self.config, prefill_or_decode=prefill_or_decode
++        )
+diff --git a/neusim/npusim/frontend/llm_ops_lib.py b/neusim/npusim/frontend/llm_ops_lib.py
+index 2a9fc23..ea02f1b 100644
+--- a/neusim/npusim/frontend/llm_ops_lib.py
++++ b/neusim/npusim/frontend/llm_ops_lib.py
+@@ -7,7 +7,7 @@ import numpy as np
+ from copy import deepcopy
+ 
+ import neusim.npusim.backend.util as util
+-from neusim.configs.models.LLMConfig import DeepSeekConfig
++from neusim.configs.models.LLMConfig import DeepSeekConfig, MoELLMConfig
+ from neusim.configs.chips.ChipConfig import ChipConfig
+ 
+ from neusim.configs.models.ModelConfig import ModelConfig
+@@ -2100,6 +2100,152 @@ def create_multi_head_attention(
+         raise ValueError(f"Unsupported attention type: {type}")
+ 
+ 
++def create_sliding_window_attention(
++    batch_size: int,
++    q_seqlen: int,
++    sliding_window_size: int,
++    num_heads: int,
++    num_kv_heads: int,
++    d_model: int,
++    d_head: int,
++    num_layers: int,
++    config: ModelConfig,
++    dtype: str = "DT_BFLOAT16",
++    fusion_id_start: int = 0,
++    is_decode: bool = False,
++    description_prefix: str = "",
++    use_flash_attention: bool = False,
++    tensor_parallelism_axes: Sequence[int] = [1],
++    ici_bw_GBps: float = 900.0,
++) -> list[Operator]:
++    '''
++    Creates attention ops for sliding window attention.
++
++    In sliding window attention, each token only attends to the previous
++    `sliding_window_size` tokens, rather than the full sequence. This reduces
++    both the compute cost of the attention block and the KV cache memory.
++
++    Behavior by phase:
++      - Prefill: Q has shape [B, q_seqlen, ...], but K/V only span
++        min(q_seqlen, sliding_window_size) tokens. The attention matmul
++        is thus [B, q_seqlen, N, D] x [B, kv_seqlen, N, D] where
++        kv_seqlen = min(q_seqlen, sliding_window_size).
++      - Decode: Each new token attends to the last sliding_window_size tokens
++        in the KV cache. The KV cache is bounded and does not grow beyond
++        the window size.
++
++    Args:
++        batch_size: Local batch size per chip.
++        q_seqlen: Full query sequence length.
++        sliding_window_size: Number of past tokens each query can attend to.
++        num_heads: Number of query attention heads (before TP splitting --
++            create_multi_head_attention handles TP internally).
++        num_kv_heads: Number of key/value attention heads for GQA.
++            For standard MHA, num_kv_heads == num_heads.
++            For GQA (e.g., GPT-oss: 64 Q heads, 8 KV heads), num_kv_heads < num_heads.
++        d_model: Hidden dimension of the model.
++        d_head: Dimension of each attention head.
++        num_layers: Number of layers using this attention type.
++        config: Model configuration object.
++        dtype: Data type for tensors.
++        fusion_id_start: Starting fusion ID for operator grouping.
++        is_decode: Whether this is decode (True) or prefill (False).
++        description_prefix: Prefix for operator descriptions.
++        use_flash_attention: Whether to use flash attention for prefill.
++        tensor_parallelism_axes: TP axis dimensions.
++        ici_bw_GBps: ICI bandwidth in GB/s.
++
++    Returns:
++        List of Operator objects representing the sliding window attention.
++
++    Hints:
++        - The key difference from full attention is the KV sequence length.
++          Think about what kv_seqlen should be in each phase (prefill vs decode).
++        - You can reuse the existing create_multi_head_attention() function
++          by passing appropriate arguments. Look at how it handles the
++          "cross-attention" type with separate q_seqlen and kv_seqlen for prefill,
++          and "self-attention" type with input_seqlen/output_seqlen for decode.
++        - For the Q/K/V projections, the weight shapes are the same as full
++          attention -- only the attention computation uses the reduced window.
++        - Don't forget to account for GQA: K and V projections should use
++          num_kv_heads, not num_heads.
++        - IMPORTANT for decode: the self-attention decode path internally splits
++          the KV cache into prefix (input_seqlen) and suffix (output_seqlen).
++          Both must be >= 1; passing output_seqlen=0 will cause a
++          ZeroDivisionError in the backend. So for a bounded cache of size W,
++          use input_seqlen=W-1, output_seqlen=1 (or similar split that sums to W).
++    '''
++
++    # TODO: Implement sliding window attention.
++    #
++    # Step 1: Compute the effective KV sequence length based on the phase.
++    #   - Prefill: kv_seqlen = ???
++    #   - Decode:  kv_seqlen = ???
++    
++    if (not is_decode): # prefill
++        kv_seqlen = min(q_seqlen, sliding_window_size)
++    else: # decode
++        kv_seqlen = sliding_window_size
++        
++    # Step 2: Create the attention ops. You can either:
++    #   (a) Call create_multi_head_attention() with the right parameters, or
++    #   (b) Build the ops manually (Q/K/V projections, attention block, output projection).
++    #
++    # Step 3: Return the list of operators.
++
++    # (a)
++    # built the parameters
++
++    # attention type: 
++    # "cross-attention" type with separate q_seqlen and kv_seqlen for prefill
++    # "self-attention" type with input_seqlen/output_seqlen for decode
++    if (not is_decode): # prefill
++        attention_type = "cross-attention" 
++
++        # default value but should never be used
++        input_seqlen = q_seqlen
++        output_seqlen = q_seqlen
++
++        
++    else: # decode
++        attention_type = "self-attention"
++        # input seqlen and output seqlen for decode 
++        # Decode: Each new token attends to the last sliding_window_size tokens in the KV cache
++        # these two values should only be used for decode
++        input_seqlen = sliding_window_size - 1
++        output_seqlen = 1
++
++    
++
++
++    return create_multi_head_attention(
++        batch_size,
++        input_seqlen,
++        output_seqlen,
++        config.decode_width, # generate one token at a time
++        num_heads,
++        d_model,
++        d_head,
++        num_layers,
++        config,
++        dtype,
++        fusion_id_start,
++        is_decode,
++        description_prefix,
++        attention_type, # use two different type based on decode or prefill
++        q_seqlen,
++        kv_seqlen,
++        None, # d_query default (width of query input tensor)
++        None, # d_key default (width of key input tensor)
++        None, # d_value default (width of value input tensor)
++        use_flash_attention,
++        tensor_parallelism_axes,
++        ici_bw_GBps,
++        num_kv_heads, # i guess GQA will set this, or if not it will be none
++    )
++    
++
++
+ def create_multi_head_normal_attention_block(
+     batch_size: int,
+     q_seqlen: int,
+@@ -3421,8 +3567,8 @@ def create_ffn_deepseek_moe_gate(
+     fusion_id_start: int = 0,
+     description_prefix: str = "",
+ ) -> list[Operator]:
+-    assert isinstance(config, DeepSeekConfig), \
+-        f"Config must be an instance of DeepSeekConfig. Got {type(config)} instead."
++    assert isinstance(config, MoELLMConfig), \
++        f"Config must be an instance of MoELLMConfig (or subclass). Got {type(config)} instead."
+ 
+     ops: list[Operator] = []
+     fusion_id = fusion_id_start
+@@ -3480,8 +3626,8 @@ def create_ffn_deepseek_moe(
+     @tensor_parallelism_axes: Axes for expert tensor parallelism.
+     @expert_parallelism_axes: Axes for expert parallelism.
+     '''
+-    assert isinstance(config, DeepSeekConfig), \
+-        f"Config must be an instance of DeepSeekConfig. Got {type(config)} instead."
++    assert isinstance(config, MoELLMConfig), \
++        f"Config must be an instance of MoELLMConfig (or subclass). Got {type(config)} instead."
+ 
+     ops: list[Operator] = []
+     fusion_id = fusion_id_start
+@@ -3576,19 +3722,20 @@ def create_ffn_deepseek_moe(
+         )
+         fusion_id += 1
+ 
+-    # shared expert computation
+-    ops += create_ffn_matmul_llama(
+-        batch_size=batch_size,
+-        seqlen=seqlen,
+-        d_model=config.d_model,
+-        d_ff=(d_ff * config.num_shared_experts),
+-        count=count,
+-        dtype=dtype,
+-        fusion_id_start=fusion_id,
+-        is_decode=is_decode,
+-        description_prefix=(description_prefix + "FFN_shared_expert-"),
+-    )
+-    fusion_id = ops[-1].fusion_id + 1
++    # shared expert computation (skip if no shared experts)
++    if config.num_shared_experts > 0:
++        ops += create_ffn_matmul_llama(
++            batch_size=batch_size,
++            seqlen=seqlen,
++            d_model=config.d_model,
++            d_ff=(d_ff * config.num_shared_experts),
++            count=count,
++            dtype=dtype,
++            fusion_id_start=fusion_id,
++            is_decode=is_decode,
++            description_prefix=(description_prefix + "FFN_shared_expert-"),
++        )
++        fusion_id = ops[-1].fusion_id + 1
+ 
+     # token combine weights
+     ops.append(
+diff --git a/neusim/npusim/frontend/memory_footprint_analysis_lib.py b/neusim/npusim/frontend/memory_footprint_analysis_lib.py
+index e411801..78d89af 100644
+--- a/neusim/npusim/frontend/memory_footprint_analysis_lib.py
++++ b/neusim/npusim/frontend/memory_footprint_analysis_lib.py
+@@ -9,7 +9,7 @@ import neusim.npusim.frontend.query_results_helper_lib as results_lib
+ from neusim.configs.models.DiTConfig import DiTConfig
+ from neusim.configs.models.DLRMConfig import DLRMConfig
+ from neusim.configs.models.GLIGENConfig import GLIGENConfig
+-from neusim.configs.models.LLMConfig import DeepSeekConfig, LLMConfig
++from neusim.configs.models.LLMConfig import DeepSeekConfig, GptOssConfig, LLMConfig
+ 
+ 
+ BYTES_FP32 = 4
+@@ -222,6 +222,10 @@ def get_llm_inference_weight_mem_requirement(
+         mem_bytes = get_deepseek_inference_mem_requirement(
+             config, "prefill"
+         )
++    elif isinstance(config, GptOssConfig):
++        mem_bytes = get_gptoss_inference_mem_requirement(
++            config, "prefill"
++        )
+     else:
+         mem_bytes = get_llm_inference_mem_requirement(
+             config, "prefill", weight_bytes_per_element, 2
+@@ -263,6 +267,33 @@ def get_llm_inference_kv_cache_mem_requirement(
+             kv_cache_bytes_per_token * bs * seqlen / tp
+         )  # sequence parallelism over TP axes
+         # print(f"KV+PE cache: {kv_cache_bytes} bytes")
++    elif isinstance(config, GptOssConfig):
++        # GPT-oss: sliding window layers have bounded KV cache
++        num_kv_heads = config.num_kv_heads
++        d_head = config.d_head
++
++        # tp logic
++        num_heads = ceil(config.num_heads / tp)
++
++        # TODO: Compute the KV cache size for GPT-oss.
++        # Full attention layers use the full seqlen for KV cache.
++        # Sliding window layers use min(seqlen, sliding_window_size).
++        # The total KV cache is the sum across both layer types.
++        num_full_layers = config.num_full_layers
++        num_sliding_layers = config.num_sliding_layers
++        
++        if tp <= num_kv_heads:
++            # - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2 (for both K and V) * 2 (again for BF 16)
++            kv_cache_bytes = (bs * seqlen * num_kv_heads * d_head * 2 * 2) * num_full_layers
++            # - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
++            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2 * 2) * num_sliding_layers
++        else:
++            # - Full layers: KV cache = batch * full_seqlen * num_heads * d_head * 2
++            kv_cache_bytes = (bs * seqlen * num_heads * d_head * 2 * 2) * num_full_layers
++            # - Sliding layers: KV cache = batch * min(seqlen, window) * num_heads * d_head * 2
++            kv_cache_bytes += (bs * min(seqlen, config.sliding_window_size) * num_heads * d_head * 2 * 2) * num_sliding_layers
++            
++        
+     else:
+         num_kv_heads = config.num_kv_heads
+         d_head = config.d_head
+@@ -273,6 +304,173 @@ def get_llm_inference_kv_cache_mem_requirement(
+             kv_cache_bytes = bs * seqlen * num_heads * d_head * 2
+     return kv_cache_bytes
+ 
++def get_gptoss_inference_mem_requirement(
++    config: GptOssConfig,
++    prefill_or_decode: str = "decode",
++    weight_bytes_per_element: int = BYTES_FP16,
++    activation_bytes_per_element: int = BYTES_FP16,
++) -> int:
++    """
++    Compute the memory footprint for GPT-oss inference.
++
++    This function should account for:
++      1. Attention weights (W_q, W_k, W_v, W_o) -- same for all layers
++      2. MoE FFN weights (gate, up, down per expert * num_experts)
++      3. KV cache -- different for sliding vs full attention layers!
++         - Full layers: KV cache = batch * full_seqlen * kv_heads * d_head * 2
++         - Sliding layers: KV cache = batch * min(seqlen, window) * kv_heads * d_head * 2
++
++    Hints:
++      - See get_llm_inference_mem_requirement() for the standard LLM calculation.
++      - See get_deepseek_inference_mem_requirement() for a MoE example.
++      - Remember to apply tensor parallelism (tp) to heads and dimensions.
++      - Remember to apply pipeline parallelism (pp) to num_layers.
++      - config.num_sliding_layers and config.num_full_layers give you the
++        layer counts for each attention type.
++
++    Args:
++        config: GPT-oss model configuration.
++        prefill_or_decode: "prefill" or "decode".
++        weight_bytes_per_element: Bytes per weight element (default BF16=2).
++        activation_bytes_per_element: Bytes per activation element (default BF16=2).
++
++    Returns:
++        Total memory requirement in bytes per chip.
++    """
++    # TODO: Implement memory footprint calculation for GPT-oss.
++    assert isinstance(
++        config, GptOssConfig
++    ), f"Invalid config type: {type(config)}. Expected GptOssConfig you dumb dumb."
++
++    #--------------------------------from llm interence mem requirement----------------------------
++    # tp and pp
++    tp: int = config.tensor_parallelism_degree * config.tensor_parallel_degree_dcn
++    pp: int = config.pipeline_parallelism_degree * config.pipeline_parallel_degree_dcn
++
++    # global_batch_size = config.global_batch_size
++    # batch_size = ceil(global_batch_size / dp)
++    # per dp-ici replica batch size
++    batch_size = ceil(config.microbatch_size_ici / config.data_parallelism_degree)
++
++    num_heads: int = config.num_heads
++    num_kv_heads: int = config.num_kv_heads
++    if num_kv_heads == -1:
++        num_kv_heads = num_heads
++    d_head: int = config.d_head
++    d_model: int = config.d_model
++    d_ff: int = config.d_ff
++    num_layers: int = config.num_layers
++
++    num_heads = ceil(num_heads / tp)
++    if tp <= num_kv_heads:
++        num_kv_heads = ceil(num_kv_heads / tp)
++    else:
++        num_kv_heads = num_heads
++
++    input_seqlen: int = config.input_seqlen
++    output_seqlen: int = config.output_seqlen
++    seqlen = input_seqlen + output_seqlen if prefill_or_decode == "decode" else input_seqlen
++
++    ### Model Weights:
++    
++    ### Attention Layer ###
++
++    # For GQA, if TP <= # of KV heads, then the KV cache is shared.
++    # Otherwise, the KV cache needs to be replicated across TP chips.
++    w_attn_kv = d_model * num_kv_heads * d_head * 2
++    w_attn_q = d_model * num_heads * d_head
++    w_attn_qkv = w_attn_kv + w_attn_q
++    w_attn_output = num_heads * d_head * d_model
++    w_attn = w_attn_qkv + w_attn_output  # attention weights
++
++    a_attn_q = batch_size * seqlen * num_heads * d_head
++    # nuked out the kv stuff since it is calculated later
++
++    #--------------------------------from llm interence mem requirement----------------------------
++
++    # -------------------------------from deepseek MoE weights-----------------
++    ### MoE FFN weights
++    bs = batch_size
++    ep = (
++        config.expert_parallelism_degree
++        * config.expert_parallel_degree_dcn
++    )
++    etp = config.expert_tensor_parallelism_degree
++    # TODO: we currently just assume all layers are MoE layers.
++    # Actually for DeepSeek models, the first few layers are dense layers.
++    # But they have larger d_ff than MoE experts, and should not impact
++    # our estimation of the memory footprint too much.
++    ffn_num_params = (
++        config.d_model
++        * config.moe_d_ff
++        * 3
++        / etp  # each expert has 3 matrices
++        * (config.num_shared_experts + config.num_routed_experts)
++        / ep  # total # of experts
++    )
++    moe_gate_params = (
++        config.num_routed_experts * config.d_model
++    )
++
++    ### MoE FFN activations
++    # Only needs to account for the intermediate matrices in activated experts.
++    # The input and output matrices are already considered in MLA and KV cache.
++    # Specifically, need to allocate spaces for self.w1(x) and self.w3(x).
++    # Then w1(x) can be point-wise multiplied into w3(x) in place, and the result
++    # can be multipled with w2.
++    # We need to reserve space for the worst case token distribution:
++    #   All tokens are routed to the same expert group.
++    ffn_expert_act = (
++        bs * seqlen * config.moe_d_ff * 2 / etp
++    )
++    # -------------------------------from deepseek MoE weights------------------
++
++    ## KV cache
++    # GPT-oss: sliding window layers have bounded KV cache
++
++    num_stages = max(pp, 1)
++    base_layers_per_stage = config.num_layers // num_stages
++    extra_layers = config.num_layers % num_stages
++
++    total_mem_footprint_bytes = 0
++    start_idx = 0
++
++    for stage_idx in range(num_stages):
++        local_num_layers = base_layers_per_stage + (1 if stage_idx < extra_layers else 0)
++        local_layer_types = config.layer_types[start_idx:start_idx + local_num_layers]
++        start_idx += local_num_layers
++
++        local_num_full_layers = sum(
++            1 for layer_type in local_layer_types if layer_type == "full_attention"
++        )
++        local_num_sliding_layers = sum(
++            1 for layer_type in local_layer_types if layer_type == "sliding_attention"
++        )
++
++        total_weights = (
++            w_attn * local_num_layers
++            + (ffn_num_params + moe_gate_params) * local_num_layers
++        )
++
++        total_act = (
++            a_attn_q * local_num_layers
++            + ffn_expert_act * local_num_layers
++            + (bs * seqlen * num_kv_heads * d_head * 2) * local_num_full_layers
++            + (bs * min(seqlen, config.sliding_window_size) * num_kv_heads * d_head * 2) * local_num_sliding_layers
++        )
++
++        stage_mem_footprint_bytes = (
++            total_weights * weight_bytes_per_element
++            + total_act * activation_bytes_per_element
++        )
++
++        total_mem_footprint_bytes = max(
++            total_mem_footprint_bytes,
++            stage_mem_footprint_bytes
++        )
++
++    return round(total_mem_footprint_bytes)
++
+ 
+ def get_deepseek_inference_mem_requirement(config: DeepSeekConfig, prefill_or_decode: str = "decode") -> int:
+     """
+@@ -514,4 +712,4 @@ def get_mem_requirement(
+         else:
+             raise ValueError(f"Unknown model: {model}")
+     else:
+-        raise ValueError(f"Unknown model: {model}")
++        raise ValueError(f"Unknown model: {model}")
+\ No newline at end of file
+diff --git a/neusim/npusim/frontend/run_sim_lib.py b/neusim/npusim/frontend/run_sim_lib.py
+index 4e459a1..d3cc4ff 100644
+--- a/neusim/npusim/frontend/run_sim_lib.py
++++ b/neusim/npusim/frontend/run_sim_lib.py
+@@ -209,7 +209,7 @@ def generate_parallelism_configs(num_chips: int, model: str, *args, **kwargs) ->
+ 
+     if "llama" in model.lower():
+         return generate_parallelism_configs_llm(num_chips, *args, **kwargs)
+-    elif "deepseek" in model.lower():
++    elif "deepseek" in model.lower() or "gpt-oss" in model.lower():
+         return generate_parallelism_configs_llm_moe(num_chips, *args, **kwargs)
+     elif "dlrm" in model.lower():
+         return generate_parallelism_configs_dlrm(num_chips, *args, **kwargs)
+@@ -436,6 +436,8 @@ def map_parallelism_to_ici_axes(model: str, v: str, parallelism_config: dict[str
+         return map_parallelism_to_ici_axes_llm(model, v, parallelism_config)
+     elif "deepseek" in model.lower():
+         return map_parallelism_to_ici_axes_llm_moe(model, v, parallelism_config)
++    elif "gpt-oss" in model.lower():
++        return map_parallelism_to_ici_axes_llm_moe(model, v, parallelism_config)
+     elif "dlrm" in model.lower():
+         return max_num_axes, max_num_axes, 0
+     elif "gligen" in model.lower() or "dit" in model.lower():
+@@ -618,6 +620,8 @@ def validate_parallelism_config(
+         return validate_parallelism_config_llm(model, v, config, workload, allow_oom, prefill_or_decode)
+     elif "deepseek" in model.lower():
+         return validate_parallelism_config_llm_moe(model, v, config, workload, allow_oom, prefill_or_decode)
++    elif "gpt-oss" in model.lower():
++        return validate_parallelism_config_llm_moe(model, v, config, workload, allow_oom, prefill_or_decode)
+     elif "dlrm" in model.lower():
+         return True
+     elif "gligen" in model.lower() or "dit" in model.lower():
+diff --git a/neusim/run_scripts/run_sim.py b/neusim/run_scripts/run_sim.py
+index ac03f14..1d82f4d 100644
+--- a/neusim/run_scripts/run_sim.py
++++ b/neusim/run_scripts/run_sim.py
+@@ -19,6 +19,7 @@ from neusim.npusim.frontend.dlrm_ops_generator import DLRMOpsGenerator
+ from neusim.npusim.frontend.llm_ops_generator import LLMOpsGeneratorBase, LLMOpsGeneratorTraining
+ from neusim.npusim.frontend.llm_ops_generator import LLMOpsGeneratorInference
+ from neusim.npusim.frontend.llm_ops_generator import DeepSeekOpsGenerator
++from neusim.npusim.frontend.llm_ops_generator import GptOssOpsGenerator
+ 
+ 
+ models = flags.DEFINE_list(
+@@ -132,8 +133,8 @@ def dump_stats_llm(v: str, base_config: dict[str, Any], ops_gen: LLMOpsGenerator
+         decode_stats["throughput_tokens_per_sec"] = microbatch_size_ici * 1e9 / decode_pp_stage_time_ns
+         decode_stats["throughput_tokens_per_sec_request"] = 1e3 / decode_stats["TPOT_ms_request"]
+ 
+-        assert isinstance(ops_gen, (LLMOpsGeneratorInference, DeepSeekOpsGenerator)), \
+-            f"ops_gen should be LLMOpsGeneratorInference or DeepSeekOpsGenerator, but got {type(ops_gen)}"
++        assert isinstance(ops_gen, (LLMOpsGeneratorInference, DeepSeekOpsGenerator, GptOssOpsGenerator)), \
++            f"ops_gen should be LLMOpsGeneratorInference, DeepSeekOpsGenerator, or GptOssOpsGenerator, but got {type(ops_gen)}"
+         prefill_stats["mem_footprint_GB"] = ops_gen.compute_memory_footprint_bytes("prefill") / 1024 / 1024 / 1024
+         prefill_stats["out_of_memory"] = (base_config["hbm_size_GB"] < prefill_stats["mem_footprint_GB"])
+         decode_stats["mem_footprint_GB"] = ops_gen.compute_memory_footprint_bytes("decode") / 1024 / 1024 / 1024
+@@ -272,7 +273,7 @@ def dump_stats_stable_diffusion(v: str, base_config: dict[str, Any], ops_gen: Di
+ 
+ 
+ def dump_stats(model: str, v: str, base_config: dict[str, Any], ops_gen, workload: str = "inference"):
+-    if "llama" in model.lower() or "deepseek" in model.lower():
++    if "llama" in model.lower() or "deepseek" in model.lower() or "gpt-oss" in model.lower():
+         dump_stats_llm(v, base_config, ops_gen, workload)
+     elif "dlrm" in model.lower():
+         dump_stats_dlrm(v, base_config, ops_gen, workload)
+@@ -375,8 +376,8 @@ def generate(
+     ## Map parallelism degrees to physical ICI axes
+     axes_mappings = run_sim_lib.map_parallelism_to_ici_axes(model, v, parallelism_config)
+ 
+-    if "deepseek" in model.lower():
+-        assert len(axes_mappings) == 4, f"DeepSeek model {model} v{v} should have 4 axes mappings (dp, tp, pp, ep), but got {len(axes_mappings)}"
++    if "deepseek" in model.lower() or "gpt-oss" in model.lower():
++        assert len(axes_mappings) == 4, f"MoE model {model} v{v} should have 4 axes mappings (dp, tp, pp, ep), but got {len(axes_mappings)}"
+         dp_axes, tp_axes, pp_axes, ep_axes = axes_mappings
+     else:
+         assert len(axes_mappings) == 3, f"Model {model} v{v} should have 3 axes mappings (dp, tp, pp), but got {len(axes_mappings)}"
+@@ -387,7 +388,7 @@ def generate(
+     base_config["num_data_parallel_axes"] = dp_axes
+     base_config["num_tensor_parallel_axes"] = tp_axes
+     base_config["num_pipeline_parallel_axes"] = pp_axes
+-    if "deepseek" in model.lower():
++    if "deepseek" in model.lower() or "gpt-oss" in model.lower():
+         base_config["num_expert_parallel_axes"] = ep_axes
+ 
+     ## create output dir
+@@ -410,6 +411,13 @@ def generate(
+             ops_generator = DeepSeekOpsGenerator(base_config)
+         else:
+             raise ValueError(f"Invalid workload: {workload}")
++    elif "gpt-oss" in model.lower():
++        if workload == "training":
++            raise NotImplementedError("GPT-oss training is not supported yet")
++        elif workload == "inference":
++            ops_generator = GptOssOpsGenerator(base_config)
++        else:
++            raise ValueError(f"Invalid workload: {workload}")
+     elif "dlrm" in model.lower():
+         if workload == "training":
+             raise NotImplementedError("DLRM training is not supported yet")
+diff --git a/neusim/run_scripts/sweep_chip_params.py b/neusim/run_scripts/sweep_chip_params.py
+new file mode 100644
+index 0000000..9c7cc08
+--- /dev/null
++++ b/neusim/run_scripts/sweep_chip_params.py
+@@ -0,0 +1,341 @@
++#!/usr/bin/env python3
++
++"""Sweep individual NPU chip parameters for single-chip design space exploration.
++
++This script loads the base TPUv5p + Llama-3-8B configuration, then sweeps one
++chip parameter at a time across a set of values and batch sizes. For each
++combination it runs the NeuSim simulation and collects end-to-end latency and
++throughput metrics for both prefill and decode phases.
++
++The baseline TPUv5p configuration values are:
++    num_sa=8, sa_dim=128, num_vu=6, hbm_bw_GBps=2765, vmem_size_MB=128
++
++Each sweep varies ONE parameter while keeping all others at baseline. This
++lets you study the sensitivity of inference performance to each hardware
++component in isolation.
++
++Output:
++    results/sweep/<param>_<value>/bs<batch_size>/
++        inference-v5p.csv            -- combined operator trace
++        inference-v5p_prefill.csv    -- prefill operator trace
++        inference-v5p_decode.csv     -- decode operator trace
++        prefill.json                 -- prefill end-to-end stats
++        decode.json                  -- decode end-to-end stats
++    results/sweep/sweep_summary.csv  -- one-row-per-run summary of all sweeps
++
++Usage:
++    # Run all default sweeps (5 params x 5 values x 5 batch sizes = 125 runs)
++    python sweep_chip_params.py
++
++    # Sweep only specific parameters
++    python sweep_chip_params.py --params num_sa hbm_bw_GBps
++
++    # Override batch sizes (comma-separated)
++    python sweep_chip_params.py --batch_sizes 1,16,256
++
++    # Change the model config (default: llama3-8b)
++    python sweep_chip_params.py --model configs/models/llama3-8b.json
++
++    # Change the chip config baseline (default: tpuv5p)
++    python sweep_chip_params.py --chip configs/chips/tpuv5p.json
++
++    # Change output directory
++    python sweep_chip_params.py --output_dir results/my_sweep
++
++    # Override sequence lengths
++    python sweep_chip_params.py --batch_sizes 4 --input_seqlen 4096 --output_seqlen 128
++
++    # Combine flags
++    python sweep_chip_params.py --params num_sa sa_dim --batch_sizes 1,4 --output_dir results/quick
++"""
++
++import json
++import argparse
++import csv
++from pathlib import Path
++
++from neusim.npusim.frontend.llm_ops_generator import LLMOpsGeneratorInference
++from neusim.npusim.frontend import run_sim_lib
++
++
++def _get_ops_generator(config: dict):
++    """Return the appropriate OpsGenerator based on the model name in config."""
++    model_name = config.get("model_name", "").lower()
++    if "gpt-oss" in model_name:
++        from neusim.npusim.frontend.llm_ops_generator import GptOssOpsGenerator
++        return GptOssOpsGenerator(config)
++    elif "deepseek" in model_name:
++        from neusim.npusim.frontend.llm_ops_generator import DeepSeekOpsGenerator
++        return DeepSeekOpsGenerator(config)
++    else:
++        return LLMOpsGeneratorInference(config)
++
++
++NEUSIM_ROOT = Path(__file__).resolve().parent.parent.parent
++
++# ---------------------------------------------------------------------------
++# Sweep definitions
++# ---------------------------------------------------------------------------
++# Each entry maps a parameter name to:
++#   (list_of_values_to_sweep, extra_overrides_or_None)
++#
++# extra_overrides is a dict mapping {target_param: source_param} for cases
++# where changing one parameter requires a coupled change to another.
++# For example, num_vu_ports must always equal num_vu.
++
++DEFAULT_SWEEPS: dict[str, tuple[list, dict[str, str] | None]] = {
++    "num_sa":       ([1, 2, 4, 8, 16],             None),
++    "sa_dim":       ([32, 64, 128, 256, 512],       None),
++    "num_vu":       ([1, 2, 4, 6, 12],              {"num_vu_ports": "num_vu"}),
++    "hbm_bw_GBps":  ([500, 1000, 2000, 2765, 4000], None),
++    "vmem_size_MB": ([16, 32, 64, 128, 256],        None),
++}
++
++DEFAULT_BATCH_SIZES = [1, 4, 16, 64, 256]
++
++
++# ---------------------------------------------------------------------------
++# Config loading
++# ---------------------------------------------------------------------------
++
++def load_base_config(
++    model_path: str | None = None,
++    chip_path: str | None = None,
++) -> dict:
++    """Load and merge the base model, chip, and system configs.
++
++    Args:
++        model_path: Path to model JSON config. Defaults to llama3-8b.
++        chip_path: Path to chip JSON config. Defaults to tpuv5p.
++    """
++    model_path = model_path or str(NEUSIM_ROOT / "configs/models/llama3-8b.json")
++    chip_path = chip_path or str(NEUSIM_ROOT / "configs/chips/tpuv5p.json")
++
++    with open(model_path) as f:
++        model_cfg = json.load(f)
++    with open(chip_path) as f:
++        npu_cfg = json.load(f)
++    with open(NEUSIM_ROOT / "configs/systems/system_config.json") as f:
++        sys_cfg = json.load(f)
++    return {**sys_cfg, **npu_cfg, **model_cfg}
++
++
++# ---------------------------------------------------------------------------
++# Single simulation run
++# ---------------------------------------------------------------------------
++
++def run_single(
++    base_config: dict,
++    param_name: str,
++    param_value,
++    batch_size: int,
++    output_root: Path,
++    extra_overrides: dict[str, str] | None = None,
++    input_seqlen: int | None = None,
++    output_seqlen: int | None = None,
++) -> dict:
++    """Run one simulation with the given parameter override and return metrics.
++
++    Args:
++        base_config: Merged base config dict.
++        param_name: Name of the chip parameter being swept (e.g. "num_sa").
++        param_value: Value to set for this parameter.
++        batch_size: Global batch size for this run.
++        output_root: Root directory for output files.
++        extra_overrides: Optional coupled parameter overrides.
++        input_seqlen: Override input sequence length. If None, uses model config default.
++        output_seqlen: Override output sequence length. If None, uses model config default.
++
++    Returns:
++        Dict with columns: param, value, batch_size, TTFT_sec,
++        prefill_throughput_tok_per_sec, TPOT_ms, decode_throughput_tok_per_sec,
++        prefill_frac_compute, prefill_frac_memory, decode_frac_compute,
++        decode_frac_memory.
++    """
++    config = dict(base_config)
++
++    # Apply the swept parameter
++    config[param_name] = param_value
++
++    # Apply any coupled overrides (e.g., num_vu_ports = num_vu)
++    if extra_overrides:
++        for target_key, source_key in extra_overrides.items():
++            config[target_key] = config[source_key]
++
++    # Override sequence lengths if specified
++    if input_seqlen is not None:
++        config["input_seqlen"] = input_seqlen
++    if output_seqlen is not None:
++        config["output_seqlen"] = output_seqlen
++
++    # Single-chip, no parallelism
++    config["num_chips"] = 1
++    config["global_batch_size"] = batch_size
++    config["microbatch_size_ici"] = batch_size
++    config["microbatch_size_dcn"] = batch_size
++    config["data_parallelism_degree"] = 1
++    config["tensor_parallelism_degree"] = 1
++    config["pipeline_parallelism_degree"] = 1
++    config["data_parallel_degree_dcn"] = 1
++    config["pipeline_parallel_degree_dcn"] = 1
++
++    outdir = output_root / f"{param_name}_{param_value}" / f"bs{batch_size}"
++    outdir.mkdir(parents=True, exist_ok=True)
++    config["output_file_path"] = str(outdir / "inference-v5p.csv")
++
++    # ---- Run simulation ----
++    ops_gen = _get_ops_generator(config)
++    ops_gen.generate(dump_to_file=True, separate_prefill_decode=True)
++
++    # ---- Collect stats ----
++    prefill_stats = run_sim_lib.get_statistics_from_trace_file(
++        str(outdir / "inference-v5p_prefill.csv")
++    )
++    decode_stats = run_sim_lib.get_statistics_from_trace_file(
++        str(outdir / "inference-v5p_decode.csv")
++    )
++
++    input_seqlen = config["input_seqlen"]
++    output_seqlen = config["output_seqlen"]
++
++    # Time to First Token (prefill latency)
++    ttft = prefill_stats["total_execution_time_chip_ns"] / 1e9
++
++    # Prefill throughput (tokens/sec across all sequences in the batch)
++    prefill_tput = batch_size * input_seqlen * 1e9 / prefill_stats["total_execution_time_chip_ns"]
++
++    # Time Per Output Token per request (decode latency)
++    tpot = decode_stats["total_execution_time_chip_ns"] / output_seqlen / 1e6
++
++    # Decode throughput (tokens/sec across all sequences in the batch)
++    decode_tput = batch_size * 1e9 / (decode_stats["total_execution_time_chip_ns"] / output_seqlen)
++
++    # Bottleneck breakdown (fraction of total chip time)
++    for stats in [prefill_stats, decode_stats]:
++        total = stats["total_execution_time_chip_ns"]
++        stats["frac_compute"] = stats.get("compute_only_time_chip_ns", 0) / total if total else 0
++        stats["frac_memory"] = stats.get("memory_only_time_chip_ns", 0) / total if total else 0
++
++    result = {
++        "param": param_name,
++        "value": param_value,
++        "batch_size": batch_size,
++        "TTFT_sec": ttft,
++        "prefill_throughput_tok_per_sec": prefill_tput,
++        "TPOT_ms": tpot,
++        "decode_throughput_tok_per_sec": decode_tput,
++        "prefill_frac_compute": prefill_stats["frac_compute"],
++        "prefill_frac_memory": prefill_stats["frac_memory"],
++        "decode_frac_compute": decode_stats["frac_compute"],
++        "decode_frac_memory": decode_stats["frac_memory"],
++    }
++
++    # Save per-run JSON
++    prefill_stats["TTFT_sec"] = ttft
++    prefill_stats["throughput_tokens_per_sec"] = prefill_tput
++    decode_stats["TPOT_ms_request"] = tpot
++    decode_stats["throughput_tokens_per_sec"] = decode_tput
++    with open(str(outdir / "prefill.json"), "w") as f:
++        json.dump(prefill_stats, f, indent=4)
++    with open(str(outdir / "decode.json"), "w") as f:
++        json.dump(decode_stats, f, indent=4)
++
++    return result
++
++
++# ---------------------------------------------------------------------------
++# Main
++# ---------------------------------------------------------------------------
++
++def main():
++    parser = argparse.ArgumentParser(
++        description="Sweep NPU chip parameters and measure LLM inference performance.",
++        formatter_class=argparse.RawDescriptionHelpFormatter,
++        epilog="""
++examples:
++  python sweep_chip_params.py                              # all sweeps, default settings
++  python sweep_chip_params.py --params num_sa hbm_bw_GBps  # only sweep two params
++  python sweep_chip_params.py --batch_sizes 1,16            # fewer batch sizes for speed
++  python sweep_chip_params.py --model configs/models/gpt-oss-20b.json  # different model
++""",
++    )
++    parser.add_argument(
++        "--params", nargs="*", default=None,
++        help="Parameters to sweep (space-separated). "
++             "Choices: num_sa, sa_dim, num_vu, hbm_bw_GBps, vmem_size_MB. "
++             "Default: all.",
++    )
++    parser.add_argument(
++        "--batch_sizes", type=str, default=None,
++        help="Comma-separated list of batch sizes. Default: 1,4,16,64,256.",
++    )
++    parser.add_argument(
++        "--model", type=str, default=None,
++        help="Path to model JSON config. Default: configs/models/llama3-8b.json.",
++    )
++    parser.add_argument(
++        "--chip", type=str, default=None,
++        help="Path to chip JSON config (baseline). Default: configs/chips/tpuv5p.json.",
++    )
++    parser.add_argument(
++        "--input_seqlen", type=int, default=None,
++        help="Override input sequence length. Default: use model config value.",
++    )
++    parser.add_argument(
++        "--output_seqlen", type=int, default=None,
++        help="Override output sequence length. Default: use model config value.",
++    )
++    parser.add_argument(
++        "--output_dir", type=str, default=str(NEUSIM_ROOT / "results" / "sweep"),
++        help="Output directory for sweep results. Default: results/sweep/.",
++    )
++    args = parser.parse_args()
++
++    params_to_sweep = args.params if args.params else list(DEFAULT_SWEEPS.keys())
++    batch_sizes = (
++        [int(x) for x in args.batch_sizes.split(",")]
++        if args.batch_sizes
++        else DEFAULT_BATCH_SIZES
++    )
++    output_root = Path(args.output_dir)
++    input_seqlen = args.input_seqlen
++    output_seqlen = args.output_seqlen
++
++    base_config = load_base_config(model_path=args.model, chip_path=args.chip)
++
++    all_results = []
++    total = sum(len(DEFAULT_SWEEPS[p][0]) for p in params_to_sweep if p in DEFAULT_SWEEPS) * len(batch_sizes)
++    done = 0
++
++    for param_name in params_to_sweep:
++        if param_name not in DEFAULT_SWEEPS:
++            print(f"Warning: unknown parameter '{param_name}', skipping.")
++            continue
++        values, extra_overrides = DEFAULT_SWEEPS[param_name]
++        print(f"\n{'='*60}")
++        print(f"Sweeping {param_name}: {values}")
++        print(f"Batch sizes: {batch_sizes}")
++        print(f"{'='*60}")
++
++        for val in values:
++            for bs in batch_sizes:
++                done += 1
++                print(f"  [{done}/{total}] {param_name}={val}, bs={bs} ... ", end="", flush=True)
++                result = run_single(base_config, param_name, val, bs, output_root, extra_overrides,
++                                    input_seqlen=input_seqlen, output_seqlen=output_seqlen)
++                all_results.append(result)
++                print(f"TTFT={result['TTFT_sec']:.4f}s, TPOT={result['TPOT_ms']:.2f}ms")
++
++    # Write summary CSV
++    if all_results:
++        summary_path = output_root / "sweep_summary.csv"
++        with open(summary_path, "w", newline="") as f:
++            writer = csv.DictWriter(f, fieldnames=all_results[0].keys())
++            writer.writeheader()
++            writer.writerows(all_results)
++        print(f"\nSummary written to {summary_path}")
++        print(f"Total runs: {len(all_results)}")
++
++
++if __name__ == "__main__":
++    main()
