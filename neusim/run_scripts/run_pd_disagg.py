@@ -74,6 +74,16 @@ __TOTAL_CHIPS = flags.DEFINE_integer(
     16,
     "Total number of chips to split between prefill and decode.",
 )
+__PREFILL_POOL_CHIPS = flags.DEFINE_integer(
+    "prefill_pool_chips",
+    -1,
+    "Chips allocated to the prefill pool. Defaults to half of total_chips.",
+)
+__DECODE_POOL_CHIPS = flags.DEFINE_integer(
+    "decode_pool_chips",
+    -1,
+    "Chips allocated to the decode pool. Defaults to the remainder after prefill allocation.",
+)
 __OUTPUT_DIR = flags.DEFINE_string(
     "output_dir",
     "results/pd_disagg",
@@ -296,8 +306,50 @@ def _write_phase_stats_json(path: str, config: dict[str, Any], stats: dict[str, 
         json.dump(payload, f, indent=2)
 
 
+def _resolve_pool_chip_budgets(
+    total_chips: int,
+    requested_prefill_chips: int,
+    requested_decode_chips: int,
+) -> tuple[int, int]:
+    if total_chips <= 0:
+        raise ValueError(f"total_chips must be positive, got {total_chips}.")
+
+    if requested_prefill_chips < 0 and requested_decode_chips < 0:
+        prefill_chips = total_chips // 2
+        decode_chips = total_chips - prefill_chips
+    elif requested_prefill_chips >= 0 and requested_decode_chips < 0:
+        prefill_chips = requested_prefill_chips
+        decode_chips = total_chips - prefill_chips
+    elif requested_prefill_chips < 0 and requested_decode_chips >= 0:
+        decode_chips = requested_decode_chips
+        prefill_chips = total_chips - decode_chips
+    else:
+        prefill_chips = requested_prefill_chips
+        decode_chips = requested_decode_chips
+
+    if prefill_chips < 0 or decode_chips < 0:
+        raise ValueError(
+            f"Invalid pool allocation: prefill={prefill_chips}, decode={decode_chips}, "
+            f"total={total_chips}."
+        )
+    if prefill_chips + decode_chips != total_chips:
+        raise ValueError(
+            f"Pool chips must sum to total_chips: prefill={prefill_chips}, "
+            f"decode={decode_chips}, total={total_chips}."
+        )
+
+    return prefill_chips, decode_chips
+
+
 def main(argv: Sequence[str]) -> None:
     del argv
+
+    total_chips = __TOTAL_CHIPS.value
+    prefill_chip_budget, decode_chip_budget = _resolve_pool_chip_budgets(
+        total_chips,
+        __PREFILL_POOL_CHIPS.value,
+        __DECODE_POOL_CHIPS.value,
+    )
 
     output_dir = _resolve_output_dir(__OUTPUT_DIR.value)
     os.makedirs(output_dir, exist_ok=True)
@@ -354,8 +406,6 @@ def main(argv: Sequence[str]) -> None:
     )
     kv_transfer_time_sec = kv_transfer_time_ms / 1e3
 
-    prefill_chip_budget = __TOTAL_CHIPS.value // 2
-    decode_chip_budget = __TOTAL_CHIPS.value - prefill_chip_budget
     num_prefill_instances = prefill_chip_budget // prefill_cfg["num_chips"]
     num_decode_instances = decode_chip_budget // decode_cfg["num_chips"]
     system_throughput = min(
