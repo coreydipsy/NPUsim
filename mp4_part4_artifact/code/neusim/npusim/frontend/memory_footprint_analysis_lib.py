@@ -16,6 +16,22 @@ BYTES_FP32 = 4
 BYTES_FP16 = 2
 
 
+def _validate_llm_config_dispatch(
+    config: str | dict[str, Any] | LLMConfig,
+) -> LLMConfig:
+    if isinstance(config, str):
+        with open(config, "r") as config_file:
+            config = dict(json.load(config_file))
+    if isinstance(config, dict):
+        model_name = str(config.get("model_name", "")).lower()
+        if model_name.startswith("deepseek"):
+            return DeepSeekConfig.model_validate(config)
+        if model_name.startswith("gpt-oss"):
+            return GptOssConfig.model_validate(config)
+        return LLMConfig.model_validate(config)
+    return deepcopy(config)
+
+
 def get_llm_training_mem_requirement(
     config: str | dict[str, Any] | LLMConfig,
     weight_bytes_per_element: int = BYTES_FP16,
@@ -31,11 +47,7 @@ def get_llm_training_mem_requirement(
 
     @return: memory requirement in bytes per chip.
     '''
-    if isinstance(config, str):
-        with open(config, "r") as config_file:
-            config = dict(json.load(config_file))
-    if isinstance(config, dict):
-        config = LLMConfig.model_validate(config)
+    config = _validate_llm_config_dispatch(config)
 
     dp: int = config.data_parallelism_degree
     tp: int = config.tensor_parallelism_degree
@@ -127,11 +139,7 @@ def get_llm_inference_mem_requirement(
 
     @return: memory requirement in bytes per chip.
     '''
-    if isinstance(config, str):
-        with open(config, "r") as config_file:
-            config = dict(json.load(config_file))
-    if isinstance(config, dict):
-        config = LLMConfig.model_validate(config)
+    config = _validate_llm_config_dispatch(config)
 
     # dp: int = config.data_parallelism_degree * config.data_parallel_degree_dcn
     tp: int = config.tensor_parallelism_degree * config.tensor_parallel_degree_dcn
@@ -207,13 +215,7 @@ def get_llm_inference_weight_mem_requirement(
     '''
     Calculate memory capacity requirements for LLM inference for model weights.
     '''
-    if isinstance(_config, str):
-        with open(_config, "r") as config_file:
-            _config = dict(json.load(config_file))
-    if isinstance(_config, dict):
-        config = LLMConfig.model_validate(_config)
-    else:
-        config = deepcopy(_config)
+    config = _validate_llm_config_dispatch(_config)
 
     config.input_seqlen = 0
     config.output_seqlen = 0
@@ -240,11 +242,7 @@ def get_llm_inference_kv_cache_mem_requirement(
     '''
     Calculate the KV cache size in bytes.
     '''
-    if isinstance(config, str):
-        with open(config, "r") as config_file:
-            config = dict(json.load(config_file))
-    if isinstance(config, dict):
-        config = LLMConfig.model_validate(config)
+    config = _validate_llm_config_dispatch(config)
 
     seqlen = config.input_seqlen if prefill_or_decode == "prefill" else (config.input_seqlen + config.output_seqlen)
     tp = (

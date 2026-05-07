@@ -23,7 +23,6 @@ import neusim.npusim.frontend.Operator as Operator
 import neusim.npusim.frontend.memory_footprint_analysis_lib as mem_footprint_lib
 import neusim.npusim.frontend.op_analysis_lib as analysis_lib
 import neusim.npusim.frontend.run_sim_lib as run_sim_lib
-from neusim.configs.models.LLMConfig import DeepSeekConfig, GptOssConfig, LLMConfig
 from neusim.npusim.frontend.llm_ops_generator import (
     DeepSeekOpsGenerator,
     GptOssOpsGenerator,
@@ -286,15 +285,8 @@ def _get_unsharded_kv_cache_bytes(config: dict[str, Any]) -> int:
     kv_config = deepcopy(config)
     kv_config["tensor_parallelism_degree"] = 1
     kv_config["tensor_parallel_degree_dcn"] = 1
-    model_name = str(kv_config.get("model_name", "")).lower()
-    if model_name.startswith("deepseek"):
-        validated_config = DeepSeekConfig.model_validate(kv_config)
-    elif model_name.startswith("gpt-oss"):
-        validated_config = GptOssConfig.model_validate(kv_config)
-    else:
-        validated_config = LLMConfig.model_validate(kv_config)
     return mem_footprint_lib.get_llm_inference_kv_cache_mem_requirement(
-        validated_config,
+        kv_config,
         "prefill",
     )
 

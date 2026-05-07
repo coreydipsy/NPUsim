@@ -1,0 +1,117 @@
+{
+  "model_name": "gpt-oss-120b",
+  "chip_name": "5p",
+  "input_seqlen": 2048,
+  "output_seqlen": 128,
+  "total_chips": 256,
+  "allow_empty_pools": false,
+  "selected_prefill_config_from_part3": {
+    "tp": 16,
+    "pp": 1,
+    "batch_size": 64,
+    "selection_metric": "sr_pf_tps",
+    "selection_metric_value": 276259.1,
+    "part3_row": {
+      "model": "gpt-oss-120b",
+      "model_display_name": "GPT-OSS-120B",
+      "microbatch_size": 64,
+      "tp": 16,
+      "pp": 1,
+      "pf_stage_ms": 474.453,
+      "dc_stage_ms": 9250.156,
+      "ttft_ms": 474.45,
+      "tpot_ms": 72.267,
+      "pf_ici_bytes": 79705866240.0,
+      "dc_ici_bytes": 39944741760.0,
+      "ss_pf_tps": 276259.1,
+      "ss_dc_tps": 885.6,
+      "sr_pf_tps": 276259.1,
+      "sr_dc_tps": 885.6
+    },
+    "steady_state_request_qps_from_part3": 134.892138671875,
+    "single_request_request_qps_from_part3": 134.892138671875
+  },
+  "selected_decode_config_from_part3": {
+    "tp": 8,
+    "pp": 2,
+    "batch_size": 64,
+    "selection_metric": "sr_dc_tps",
+    "selection_metric_value": 905.2,
+    "part3_row": {
+      "model": "gpt-oss-120b",
+      "model_display_name": "GPT-OSS-120B",
+      "microbatch_size": 64,
+      "tp": 8,
+      "pp": 2,
+      "pf_stage_ms": 497.639,
+      "dc_stage_ms": 4524.972,
+      "ttft_ms": 995.28,
+      "tpot_ms": 70.703,
+      "pf_ici_bytes": 74384179200.0,
+      "dc_ici_bytes": 10899878400.0,
+      "ss_pf_tps": 263387.6,
+      "ss_dc_tps": 1810.4,
+      "sr_pf_tps": 131693.8,
+      "sr_dc_tps": 905.2
+    },
+    "steady_state_request_qps_from_part3": 14.14375,
+    "single_request_request_qps_from_part3": 7.071875
+  },
+  "prefill_instance_metrics": {
+    "tp": 16,
+    "pp": 1,
+    "batch_size": 64,
+    "chips_per_instance": 16,
+    "ttft_sec_without_kv_transfer": 0.474453216,
+    "ttft_sec_with_kv_transfer": 0.665703216,
+    "kv_cache_transfer_bytes": 5133828096,
+    "kv_cache_transfer_time_ms": 191.25,
+    "request_qps_without_kv_transfer": 134.8921196900476,
+    "request_qps_with_kv_transfer": 96.13893768540844
+  },
+  "decode_instance_metrics": {
+    "tp": 8,
+    "pp": 2,
+    "batch_size": 64,
+    "chips_per_instance": 16,
+    "tpot_ms_request": 5.152941,
+    "decode_time_sec": 0.659576448,
+    "request_qps": 97.03196679333219
+  },
+  "best_allocations_with_kv_transfer": [
+    {
+      "prefill_pool_chips": 32,
+      "decode_pool_chips": 224,
+      "num_prefill_instances": 2,
+      "num_decode_instances": 14,
+      "prefill_instance_chips": 16,
+      "decode_instance_chips": 16,
+      "prefill_capacity_qps_without_kv_transfer": 269.784277,
+      "prefill_capacity_qps_with_kv_transfer": 192.277875,
+      "decode_capacity_qps": 198.0125,
+      "system_throughput_qps_without_kv_transfer": 198.0125,
+      "system_throughput_qps_with_kv_transfer": 192.277875,
+      "bottleneck_without_kv_transfer": "decode",
+      "bottleneck_with_kv_transfer": "prefill"
+    }
+  ],
+  "best_allocations_without_kv_transfer": [
+    {
+      "prefill_pool_chips": 32,
+      "decode_pool_chips": 224,
+      "num_prefill_instances": 2,
+      "num_decode_instances": 14,
+      "prefill_instance_chips": 16,
+      "decode_instance_chips": 16,
+      "prefill_capacity_qps_without_kv_transfer": 269.784277,
+      "prefill_capacity_qps_with_kv_transfer": 192.277875,
+      "decode_capacity_qps": 198.0125,
+      "system_throughput_qps_without_kv_transfer": 198.0125,
+      "system_throughput_qps_with_kv_transfer": 192.277875,
+      "bottleneck_without_kv_transfer": "decode",
+      "bottleneck_with_kv_transfer": "prefill"
+    }
+  ],
+  "csv_path": "/home/coreydipsy/ECE511/NeuSim/results/sweep_pd_allocation_gptoss120b_nonempty/sweep_pd_allocation.csv",
+  "plot_path": "/home/coreydipsy/ECE511/NeuSim/results/sweep_pd_allocation_gptoss120b_nonempty/sweep_pd_allocation.png"
+}

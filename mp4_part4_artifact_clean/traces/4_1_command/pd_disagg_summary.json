@@ -1,0 +1,19 @@
+{
+  "model_name": "llama3-8b",
+  "chip_name": "5p",
+  "prefill_chip_budget": 1,
+  "decode_chip_budget": 1,
+  "ttft_sec_without_kv_transfer": 0.15274144,
+  "kv_cache_transfer_bytes": 8388608,
+  "kv_cache_transfer_time_ms": 0.3125,
+  "kv_cache_transfer_time_sec": 0.0003125,
+  "ttft_sec_with_kv_transfer": 0.15305394,
+  "tpot_ms_request": 5.018112,
+  "prefill_throughput_tokens_per_sec_per_instance": 26816.560063856934,
+  "decode_throughput_tokens_per_sec_per_instance": 199.27813488419548,
+  "prefill_throughput_queries_per_sec_per_instance": 6.547011734340072,
+  "decode_throughput_queries_per_sec_per_instance": 0.3892151071956943,
+  "num_prefill_instances": 1,
+  "num_decode_instances": 1,
+  "system_throughput_queries_per_sec": 0.3892151071956943
+}

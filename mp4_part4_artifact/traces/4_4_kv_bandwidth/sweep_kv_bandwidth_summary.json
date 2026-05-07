@@ -1,0 +1,158 @@
+{
+  "model_name": "gpt-oss-120b",
+  "chip_name": "5p",
+  "input_seqlen": 2048,
+  "output_seqlen": 128,
+  "selected_prefill_config_from_part3": {
+    "tp": 16,
+    "pp": 1,
+    "batch_size": 64,
+    "selection_metric": "sr_pf_tps",
+    "selection_metric_value": 276259.1,
+    "part3_row": {
+      "model": "gpt-oss-120b",
+      "model_display_name": "GPT-OSS-120B",
+      "microbatch_size": 64,
+      "tp": 16,
+      "pp": 1,
+      "pf_stage_ms": 474.453,
+      "dc_stage_ms": 9250.156,
+      "ttft_ms": 474.45,
+      "tpot_ms": 72.267,
+      "pf_ici_bytes": 79705866240.0,
+      "dc_ici_bytes": 39944741760.0,
+      "ss_pf_tps": 276259.1,
+      "ss_dc_tps": 885.6,
+      "sr_pf_tps": 276259.1,
+      "sr_dc_tps": 885.6
+    }
+  },
+  "prefill_ttft_ms_without_kv_transfer": 474.453216,
+  "kv_cache_transfer_bytes": 5133828096,
+  "rows": [
+    {
+      "dcn_bw_GBps": 25.0,
+      "kv_transfer_time_ms": 191.25,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 665.703216,
+      "kv_fraction_of_prefill_compute": 0.403095592042525,
+      "kv_fraction_of_total_ttft": 0.28729018488022445
+    },
+    {
+      "dcn_bw_GBps": 50.0,
+      "kv_transfer_time_ms": 95.625,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 570.078216,
+      "kv_fraction_of_prefill_compute": 0.2015477960212625,
+      "kv_fraction_of_total_ttft": 0.1677401404161004
+    },
+    {
+      "dcn_bw_GBps": 75.0,
+      "kv_transfer_time_ms": 63.75,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 538.203216,
+      "kv_fraction_of_prefill_compute": 0.13436519734750835,
+      "kv_fraction_of_total_ttft": 0.11844968239654667
+    },
+    {
+      "dcn_bw_GBps": 100.0,
+      "kv_transfer_time_ms": 47.8125,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 522.265716,
+      "kv_fraction_of_prefill_compute": 0.10077389801063125,
+      "kv_fraction_of_total_ttft": 0.09154822638214298
+    },
+    {
+      "dcn_bw_GBps": 125.0,
+      "kv_transfer_time_ms": 38.25,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 512.703216,
+      "kv_fraction_of_prefill_compute": 0.080619118408505,
+      "kv_fraction_of_total_ttft": 0.07460456421244684
+    },
+    {
+      "dcn_bw_GBps": 150.0,
+      "kv_transfer_time_ms": 31.875,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 506.328216,
+      "kv_fraction_of_prefill_compute": 0.06718259867375417,
+      "kv_fraction_of_total_ttft": 0.06295323664126987
+    },
+    {
+      "dcn_bw_GBps": 175.0,
+      "kv_transfer_time_ms": 27.321428571428573,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 501.7746445714286,
+      "kv_fraction_of_prefill_compute": 0.057585084577503574,
+      "kv_fraction_of_total_ttft": 0.05444959976956212
+    },
+    {
+      "dcn_bw_GBps": 200.0,
+      "kv_transfer_time_ms": 23.90625,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 498.35946600000005,
+      "kv_fraction_of_prefill_compute": 0.05038694900531562,
+      "kv_fraction_of_total_ttft": 0.047969892479176865
+    },
+    {
+      "dcn_bw_GBps": 225.0,
+      "kv_transfer_time_ms": 21.25,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 495.703216,
+      "kv_fraction_of_prefill_compute": 0.04478839911583611,
+      "kv_fraction_of_total_ttft": 0.04286839244553136
+    },
+    {
+      "dcn_bw_GBps": 250.0,
+      "kv_transfer_time_ms": 19.125,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 493.578216,
+      "kv_fraction_of_prefill_compute": 0.0403095592042525,
+      "kv_fraction_of_total_ttft": 0.03874765818271039
+    },
+    {
+      "dcn_bw_GBps": 300.0,
+      "kv_transfer_time_ms": 15.9375,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 490.390716,
+      "kv_fraction_of_prefill_compute": 0.03359129933687709,
+      "kv_fraction_of_total_ttft": 0.03249959568973569
+    },
+    {
+      "dcn_bw_GBps": 350.0,
+      "kv_transfer_time_ms": 13.660714285714286,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 488.11393028571433,
+      "kv_fraction_of_prefill_compute": 0.028792542288751787,
+      "kv_fraction_of_total_ttft": 0.027986733092657437
+    },
+    {
+      "dcn_bw_GBps": 400.0,
+      "kv_transfer_time_ms": 11.953125,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 486.406341,
+      "kv_fraction_of_prefill_compute": 0.02519347450265781,
+      "kv_fraction_of_total_ttft": 0.02457436096623584
+    }
+  ],
+  "requested_bandwidth_points": {
+    "50_GBps": {
+      "dcn_bw_GBps": 50.0,
+      "kv_transfer_time_ms": 95.625,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 570.078216,
+      "kv_fraction_of_prefill_compute": 0.2015477960212625,
+      "kv_fraction_of_total_ttft": 0.1677401404161004
+    },
+    "200_GBps": {
+      "dcn_bw_GBps": 200.0,
+      "kv_transfer_time_ms": 23.90625,
+      "prefill_ttft_ms_without_kv_transfer": 474.453216,
+      "total_ttft_ms_with_kv_transfer": 498.35946600000005,
+      "kv_fraction_of_prefill_compute": 0.05038694900531562,
+      "kv_fraction_of_total_ttft": 0.047969892479176865
+    }
+  },
+  "csv_path": "/home/coreydipsy/ECE511/NeuSim/results/sweep_kv_bandwidth_gptoss120b/sweep_kv_bandwidth.csv",
+  "plot_path": "/home/coreydipsy/ECE511/NeuSim/results/sweep_kv_bandwidth_gptoss120b/sweep_kv_bandwidth.png"
+}

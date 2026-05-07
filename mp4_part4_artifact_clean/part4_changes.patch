@@ -1,0 +1,408 @@
+diff --git a/neusim/run_scripts/run_pd_disagg.py b/neusim/run_scripts/run_pd_disagg.py
+index 3c34742..83fbf7f 100644
+--- a/neusim/run_scripts/run_pd_disagg.py
++++ b/neusim/run_scripts/run_pd_disagg.py
+@@ -23,6 +23,7 @@ import neusim.npusim.frontend.Operator as Operator
+ import neusim.npusim.frontend.memory_footprint_analysis_lib as mem_footprint_lib
+ import neusim.npusim.frontend.op_analysis_lib as analysis_lib
+ import neusim.npusim.frontend.run_sim_lib as run_sim_lib
++from neusim.configs.models.LLMConfig import DeepSeekConfig, GptOssConfig, LLMConfig
+ from neusim.npusim.frontend.llm_ops_generator import (
+     DeepSeekOpsGenerator,
+     GptOssOpsGenerator,
+@@ -285,8 +286,15 @@ def _get_unsharded_kv_cache_bytes(config: dict[str, Any]) -> int:
+     kv_config = deepcopy(config)
+     kv_config["tensor_parallelism_degree"] = 1
+     kv_config["tensor_parallel_degree_dcn"] = 1
++    model_name = str(kv_config.get("model_name", "")).lower()
++    if model_name.startswith("deepseek"):
++        validated_config = DeepSeekConfig.model_validate(kv_config)
++    elif model_name.startswith("gpt-oss"):
++        validated_config = GptOssConfig.model_validate(kv_config)
++    else:
++        validated_config = LLMConfig.model_validate(kv_config)
+     return mem_footprint_lib.get_llm_inference_kv_cache_mem_requirement(
+-        kv_config,
++        validated_config,
+         "prefill",
+     )
+ 
+diff --git a/neusim/run_scripts/sweep_pd_allocation.py b/neusim/run_scripts/sweep_pd_allocation.py
+index f5ab48a..21af181 100644
+--- a/neusim/run_scripts/sweep_pd_allocation.py
++++ b/neusim/run_scripts/sweep_pd_allocation.py
+@@ -88,6 +88,20 @@ def _pick_best_config(
+     }
+ 
+ 
++def _part3_request_qps_from_steady_state(
++    choice: dict[str, Any],
++    *,
++    phase: str,
++    input_seqlen: int,
++    output_seqlen: int,
++) -> float:
++    if phase == "prefill":
++        return choice["part3_row"]["ss_pf_tps"] / input_seqlen
++    if phase == "decode":
++        return choice["part3_row"]["ss_dc_tps"] / output_seqlen
++    raise ValueError(f"Unsupported phase: {phase}")
++
++
+ def _simulate_selected_configs(
+     model_config_path: Path,
+     chip_config_path: Path,
+@@ -195,6 +209,8 @@ def _enumerate_valid_allocations(
+     total_chips: int,
+     prefill_instance_chips: int,
+     decode_instance_chips: int,
++    *,
++    allow_empty_pools: bool,
+ ) -> list[tuple[int, int]]:
+     allocations: list[tuple[int, int]] = []
+     for prefill_pool_chips in range(total_chips + 1):
+@@ -203,6 +219,10 @@ def _enumerate_valid_allocations(
+             continue
+         if decode_pool_chips % decode_instance_chips != 0:
+             continue
++        if not allow_empty_pools and (
++            prefill_pool_chips == 0 or decode_pool_chips == 0
++        ):
++            continue
+         allocations.append((prefill_pool_chips, decode_pool_chips))
+     if not allocations:
+         raise ValueError(
+@@ -221,27 +241,46 @@ def _bottleneck_name(left: float, right: float) -> str:
+ 
+ def _build_sweep_rows(
+     metrics: dict[str, Any],
++    prefill_choice: dict[str, Any],
++    decode_choice: dict[str, Any],
++    *,
++    input_seqlen: int,
++    output_seqlen: int,
+     total_chips: int,
++    allow_empty_pools: bool,
+ ) -> list[dict[str, float | int | str]]:
+     prefill_instance_chips = metrics["prefill_config"]["num_chips"]
+     decode_instance_chips = metrics["decode_config"]["num_chips"]
++    # The 4.2.2 capacity model is based on the saved Part III throughput sweep.
++    # We convert steady-state token throughput to request throughput by dividing by
++    # the fixed prefill/decode sequence lengths.
++    prefill_request_qps_without_kv = _part3_request_qps_from_steady_state(
++        prefill_choice,
++        phase="prefill",
++        input_seqlen=input_seqlen,
++        output_seqlen=output_seqlen,
++    )
++    prefill_request_qps_with_kv = metrics["prefill_request_qps_with_kv_transfer"]
++    decode_request_qps = _part3_request_qps_from_steady_state(
++        decode_choice,
++        phase="decode",
++        input_seqlen=input_seqlen,
++        output_seqlen=output_seqlen,
++    )
+     rows: list[dict[str, float | int | str]] = []
+ 
+     for prefill_pool_chips, decode_pool_chips in _enumerate_valid_allocations(
+         total_chips,
+         prefill_instance_chips,
+         decode_instance_chips,
++        allow_empty_pools=allow_empty_pools,
+     ):
+         num_prefill_instances = prefill_pool_chips // prefill_instance_chips
+         num_decode_instances = decode_pool_chips // decode_instance_chips
+ 
+-        prefill_capacity_without_kv = (
+-            num_prefill_instances * metrics["prefill_request_qps_without_kv_transfer"]
+-        )
+-        prefill_capacity_with_kv = (
+-            num_prefill_instances * metrics["prefill_request_qps_with_kv_transfer"]
+-        )
+-        decode_capacity = num_decode_instances * metrics["decode_request_qps"]
++        prefill_capacity_without_kv = num_prefill_instances * prefill_request_qps_without_kv
++        prefill_capacity_with_kv = num_prefill_instances * prefill_request_qps_with_kv
++        decode_capacity = num_decode_instances * decode_request_qps
+         system_throughput_without_kv = min(prefill_capacity_without_kv, decode_capacity)
+         system_throughput_with_kv = min(prefill_capacity_with_kv, decode_capacity)
+ 
+@@ -355,6 +394,11 @@ def main() -> None:
+     parser.add_argument("--total_chips", type=int, default=DEFAULT_TOTAL_CHIPS)
+     parser.add_argument("--input_seqlen", type=int, default=DEFAULT_INPUT_SEQLEN)
+     parser.add_argument("--output_seqlen", type=int, default=DEFAULT_OUTPUT_SEQLEN)
++    parser.add_argument(
++        "--allow_empty_pools",
++        action="store_true",
++        help="Include allocations with N_P=0 or N_D=0. By default, both pools must be non-empty.",
++    )
+     args = parser.parse_args()
+ 
+     output_dir = args.output_dir
+@@ -375,7 +419,15 @@ def main() -> None:
+         input_seqlen=args.input_seqlen,
+         output_seqlen=args.output_seqlen,
+     )
+-    rows = _build_sweep_rows(metrics, args.total_chips)
++    rows = _build_sweep_rows(
++        metrics,
++        prefill_choice,
++        decode_choice,
++        input_seqlen=args.input_seqlen,
++        output_seqlen=args.output_seqlen,
++        total_chips=args.total_chips,
++        allow_empty_pools=args.allow_empty_pools,
++    )
+ 
+     csv_path = output_dir / f"{SCRIPT_STEM}.csv"
+     plot_path = output_dir / f"{SCRIPT_STEM}.png"
+@@ -391,15 +443,28 @@ def main() -> None:
+         "input_seqlen": args.input_seqlen,
+         "output_seqlen": args.output_seqlen,
+         "total_chips": args.total_chips,
++        "allow_empty_pools": args.allow_empty_pools,
+         "selected_prefill_config_from_part3": {
+             **prefill_choice,
+-            "derived_request_qps_from_part3": (
++            "steady_state_request_qps_from_part3": _part3_request_qps_from_steady_state(
++                prefill_choice,
++                phase="prefill",
++                input_seqlen=args.input_seqlen,
++                output_seqlen=args.output_seqlen,
++            ),
++            "single_request_request_qps_from_part3": (
+                 prefill_choice["part3_row"]["sr_pf_tps"] / args.input_seqlen
+             ),
+         },
+         "selected_decode_config_from_part3": {
+             **decode_choice,
+-            "derived_request_qps_from_part3": (
++            "steady_state_request_qps_from_part3": _part3_request_qps_from_steady_state(
++                decode_choice,
++                phase="decode",
++                input_seqlen=args.input_seqlen,
++                output_seqlen=args.output_seqlen,
++            ),
++            "single_request_request_qps_from_part3": (
+                 decode_choice["part3_row"]["sr_dc_tps"] / args.output_seqlen
+             ),
+         },
+diff --git a/neusim/run_scripts/sweep_kv_bandwidth.py b/neusim/run_scripts/sweep_kv_bandwidth.py
+new file mode 100644
+index 0000000..594c214
+--- /dev/null
++++ b/neusim/run_scripts/sweep_kv_bandwidth.py
+@@ -0,0 +1,214 @@
++#!/usr/bin/env python3
++
++"""Sweep KV-transfer overhead versus DCN bandwidth for MP4 Part IV discussion."""
++
++from __future__ import annotations
++
++import argparse
++import csv
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++from typing import Any
++
++
++def _find_repo_root(start: Path) -> Path:
++    for candidate in [start, *start.parents]:
++        if (candidate / "configs").is_dir() and (candidate / "neusim").is_dir():
++            return candidate
++    raise FileNotFoundError(f"Could not locate the NeuSim repo root from {start}.")
++
++
++SCRIPT_DIR = Path(__file__).resolve().parent
++REPO_ROOT = _find_repo_root(SCRIPT_DIR)
++SCRIPT_STEM = Path(__file__).stem
++if str(REPO_ROOT) not in sys.path:
++    sys.path.insert(0, str(REPO_ROOT))
++if str(SCRIPT_DIR) not in sys.path:
++    sys.path.insert(0, str(SCRIPT_DIR))
++
++import sweep_pd_allocation
++
++
++DEFAULT_MODEL = REPO_ROOT / "configs/models/gpt-oss-120b.json"
++DEFAULT_CHIP = REPO_ROOT / "configs/chips/tpuv5p.json"
++DEFAULT_PART3_CSV = REPO_ROOT / "MP4 Part 3.2 Throughput/parallelism_sweep.csv"
++DEFAULT_OUTPUT_DIR = REPO_ROOT / f"results/{SCRIPT_STEM}"
++DEFAULT_INPUT_SEQLEN = 2048
++DEFAULT_OUTPUT_SEQLEN = 128
++DEFAULT_BANDWIDTHS_GBPS = [
++    25,
++    50,
++    75,
++    100,
++    125,
++    150,
++    175,
++    200,
++    225,
++    250,
++    300,
++    350,
++    400,
++]
++
++
++def _write_csv(rows: list[dict[str, float | int]], path: Path) -> None:
++    with open(path, "w", newline="") as f:
++        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
++        writer.writeheader()
++        writer.writerows(rows)
++
++
++def _compute_rows(metrics: dict[str, Any], bandwidths_GBps: list[float]) -> list[dict[str, float | int]]:
++    kv_cache_bytes = metrics["kv_cache_transfer_bytes"]
++    prefill_ttft_sec = metrics["prefill_time_sec_without_kv_transfer"]
++    rows: list[dict[str, float | int]] = []
++
++    for bandwidth_GBps in bandwidths_GBps:
++        transfer_time_sec = kv_cache_bytes / (bandwidth_GBps * 1024**3)
++        total_ttft_sec = prefill_ttft_sec + transfer_time_sec
++        rows.append(
++            {
++                "dcn_bw_GBps": bandwidth_GBps,
++                "kv_transfer_time_ms": transfer_time_sec * 1e3,
++                "prefill_ttft_ms_without_kv_transfer": prefill_ttft_sec * 1e3,
++                "total_ttft_ms_with_kv_transfer": total_ttft_sec * 1e3,
++                "kv_fraction_of_prefill_compute": transfer_time_sec / prefill_ttft_sec,
++                "kv_fraction_of_total_ttft": transfer_time_sec / total_ttft_sec,
++            }
++        )
++
++    return rows
++
++
++def _plot(rows: list[dict[str, float | int]], output_path: Path) -> None:
++    mpl_config_dir = Path(tempfile.gettempdir()) / "neusim-mpl-cache"
++    mpl_config_dir.mkdir(parents=True, exist_ok=True)
++    os.environ.setdefault("MPLCONFIGDIR", str(mpl_config_dir))
++    import matplotlib.pyplot as plt
++
++    bandwidths = [float(row["dcn_bw_GBps"]) for row in rows]
++    kv_ms = [float(row["kv_transfer_time_ms"]) for row in rows]
++    prefill_ms = [float(row["prefill_ttft_ms_without_kv_transfer"]) for row in rows]
++
++    fig, axes = plt.subplots(1, 2, figsize=(12.5, 5.2))
++
++    axes[0].plot(bandwidths, kv_ms, marker="o", linewidth=2.5, label="KV transfer overhead")
++    axes[0].plot(
++        bandwidths,
++        prefill_ms,
++        linestyle="--",
++        linewidth=2,
++        color="black",
++        label="Prefill compute TTFT",
++    )
++
++    axes[1].plot(bandwidths, kv_ms, marker="o", linewidth=2.5, color="#1f77b4")
++
++    for target_bw in [50, 200]:
++        for bw, val in zip(bandwidths, kv_ms):
++            if abs(bw - target_bw) < 1e-9:
++                axes[0].scatter(bw, val, color="#d62728", s=70, zorder=5)
++                axes[1].scatter(bw, val, color="#d62728", s=70, zorder=5)
++                axes[1].annotate(
++                    f"{int(target_bw)} GB/s\n{val:.3f} ms",
++                    (bw, val),
++                    textcoords="offset points",
++                    xytext=(6, 8),
++                    fontsize=9,
++                )
++                break
++
++    axes[0].set_title("Comparison to Prefill Compute")
++    axes[0].set_xlabel("DCN bandwidth (GB/s)")
++    axes[0].set_ylabel("Time (ms)")
++    axes[0].grid(True, alpha=0.3)
++    axes[0].legend()
++
++    axes[1].set_title("KV Transfer Overhead (Zoomed)")
++    axes[1].set_xlabel("DCN bandwidth (GB/s)")
++    axes[1].set_ylabel("KV transfer time (ms)")
++    axes[1].grid(True, alpha=0.3)
++
++    fig.suptitle("KV Transfer Overhead vs DCN Bandwidth")
++    fig.tight_layout()
++    fig.savefig(output_path, dpi=180, bbox_inches="tight")
++    plt.close(fig)
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(
++        description="Sweep KV-transfer overhead versus DCN bandwidth."
++    )
++    parser.add_argument("--model_config", type=Path, default=DEFAULT_MODEL)
++    parser.add_argument("--chip_config", type=Path, default=DEFAULT_CHIP)
++    parser.add_argument("--part3_csv", type=Path, default=DEFAULT_PART3_CSV)
++    parser.add_argument("--output_dir", type=Path, default=DEFAULT_OUTPUT_DIR)
++    parser.add_argument("--input_seqlen", type=int, default=DEFAULT_INPUT_SEQLEN)
++    parser.add_argument("--output_seqlen", type=int, default=DEFAULT_OUTPUT_SEQLEN)
++    parser.add_argument(
++        "--bandwidths_GBps",
++        type=str,
++        default=",".join(str(x) for x in DEFAULT_BANDWIDTHS_GBPS),
++        help="Comma-separated DCN bandwidth values in GB/s.",
++    )
++    args = parser.parse_args()
++
++    output_dir = args.output_dir
++    output_dir.mkdir(parents=True, exist_ok=True)
++
++    model_config = sweep_pd_allocation._load_json(args.model_config)
++    model_name = model_config["model_name"]
++    part3_rows = sweep_pd_allocation._load_part3_rows(args.part3_csv, model_name)
++    prefill_choice = sweep_pd_allocation._pick_best_config(part3_rows, "sr_pf_tps")
++    decode_choice = sweep_pd_allocation._pick_best_config(part3_rows, "sr_dc_tps")
++
++    metrics = sweep_pd_allocation._simulate_selected_configs(
++        args.model_config,
++        args.chip_config,
++        output_dir,
++        prefill_choice=prefill_choice,
++        decode_choice=decode_choice,
++        input_seqlen=args.input_seqlen,
++        output_seqlen=args.output_seqlen,
++    )
++
++    bandwidths_GBps = [float(x) for x in args.bandwidths_GBps.split(",") if x.strip()]
++    rows = _compute_rows(metrics, bandwidths_GBps)
++
++    csv_path = output_dir / f"{SCRIPT_STEM}.csv"
++    plot_path = output_dir / f"{SCRIPT_STEM}.png"
++    summary_path = output_dir / f"{SCRIPT_STEM}_summary.json"
++    _write_csv(rows, csv_path)
++    _plot(rows, plot_path)
++
++    by_bandwidth = {str(int(row["dcn_bw_GBps"])): row for row in rows if float(row["dcn_bw_GBps"]).is_integer()}
++    summary = {
++        "model_name": metrics["model_name"],
++        "chip_name": metrics["chip_name"],
++        "input_seqlen": args.input_seqlen,
++        "output_seqlen": args.output_seqlen,
++        "selected_prefill_config_from_part3": prefill_choice,
++        "prefill_ttft_ms_without_kv_transfer": metrics["prefill_time_sec_without_kv_transfer"] * 1e3,
++        "kv_cache_transfer_bytes": metrics["kv_cache_transfer_bytes"],
++        "rows": rows,
++        "requested_bandwidth_points": {
++            "50_GBps": by_bandwidth.get("50"),
++            "200_GBps": by_bandwidth.get("200"),
++        },
++        "csv_path": str(csv_path),
++        "plot_path": str(plot_path),
++    }
++    with open(summary_path, "w") as f:
++        json.dump(summary, f, indent=2)
++
++    print(f"Wrote {csv_path}")
++    print(f"Wrote {plot_path}")
++    print(f"Wrote {summary_path}")
++
++
++if __name__ == "__main__":
++    main()
